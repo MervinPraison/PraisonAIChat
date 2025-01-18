@@ -16,13 +16,15 @@ from typing import (
 )
 
 import filetype
+from pydantic import Field
+from pydantic.dataclasses import dataclass
+from syncer import asyncio
+
 from chainlit.context import context
 from chainlit.data import get_data_layer
 from chainlit.logger import logger
 from chainlit.telemetry import trace_event
 from chainlit.types import FileDict
-from pydantic.dataclasses import Field, dataclass
-from syncer import asyncio
 
 mime_types = {
     "text": "text/plain",
@@ -31,7 +33,16 @@ mime_types = {
 }
 
 ElementType = Literal[
-    "image", "text", "pdf", "tasklist", "audio", "video", "file", "plotly", "component"
+    "image",
+    "text",
+    "pdf",
+    "tasklist",
+    "audio",
+    "video",
+    "file",
+    "plotly",
+    "dataframe",
+    "custom",
 ]
 ElementDisplay = Literal["inline", "side", "page"]
 ElementSize = Literal["small", "medium", "large"]
@@ -49,6 +60,7 @@ class ElementDict(TypedDict):
     size: Optional[ElementSize]
     language: Optional[str]
     page: Optional[int]
+    props: Optional[Dict]
     autoPlay: Optional[bool]
     playerConfig: Optional[dict]
     forId: Optional[str]
@@ -106,6 +118,7 @@ class Element:
                 "display": self.display,
                 "objectKey": getattr(self, "object_key", None),
                 "size": getattr(self, "size", None),
+                "props": getattr(self, "props", None),
                 "page": getattr(self, "page", None),
                 "autoPlay": getattr(self, "auto_play", None),
                 "playerConfig": getattr(self, "player_config", None),
@@ -145,7 +158,7 @@ class Element:
             try:
                 asyncio.create_task(data_layer.create_element(self))
             except Exception as e:
-                logger.error(f"Failed to create element: {str(e)}")
+                logger.error(f"Failed to create element: {e!s}")
         if not self.url and (not self.chainlit_key or self.updatable):
             file_dict = await context.session.persist_file(
                 name=self.name,
@@ -343,8 +356,7 @@ class Plotly(Element):
     content: str = ""
 
     def __post_init__(self) -> None:
-        from plotly import graph_objects as go
-        from plotly import io as pio
+        from plotly import graph_objects as go, io as pio
 
         if not isinstance(self.figure, go.Figure):
             raise TypeError("figure must be a plotly.graph_objects.Figure")
@@ -359,14 +371,36 @@ class Plotly(Element):
 
 
 @dataclass
-class Component(Element):
-    """Useful to send a custom component to the UI."""
+class Dataframe(Element):
+    """Useful to send a pandas DataFrame to the UI."""
 
-    type: ClassVar[ElementType] = "component"
+    type: ClassVar[ElementType] = "dataframe"
+    size: ElementSize = "large"
+    data: Any = None  # The type is Any because it is checked in __post_init__.
+
+    def __post_init__(self) -> None:
+        """Ensures the data is a pandas DataFrame and converts it to JSON."""
+        from pandas import DataFrame
+
+        if not isinstance(self.data, DataFrame):
+            raise TypeError("data must be a pandas.DataFrame")
+
+        self.content = self.data.to_json(orient="split", date_format="iso")
+        super().__post_init__()
+
+
+@dataclass
+class CustomElement(Element):
+    """Useful to send a custom element to the UI."""
+
+    type: ClassVar[ElementType] = "custom"
     mime: str = "application/json"
     props: Dict = Field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.content = json.dumps(self.props)
-
         super().__post_init__()
+        self.updatable = True
+
+    async def update(self):
+        await super().send(self.for_id)

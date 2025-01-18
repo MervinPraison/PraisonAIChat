@@ -124,7 +124,8 @@
           },
           "speechButton": {
             "start": "开始录音",
-            "stop": "停止录音"
+            "stop": "停止录音",
+            "loading": "连接中"
           },
           "SubmitButton": {
             "sendMessage": "发送消息",
@@ -144,6 +145,19 @@
             "failed": "失败",
             "feedbackUpdated": "反馈更新",
             "updating": "正在更新"
+          },
+          "copyButton": {
+            "copyToClipboard": "拷贝到剪贴板",
+            "copied": "已拷贝！"
+          },
+          "feedbackButton": {
+            "helpful": "Helpful",
+            "notHelpful": "Not helpful",
+            "editFeedback": "Edit feedback"
+          },
+          "feedbackDialog": {
+            "dialogTitle": "Add a comment",
+            "submitButton": "Submit feedback"
           }
         },
         "dropScreen": {

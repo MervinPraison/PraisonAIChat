@@ -21,6 +21,7 @@ import {
   isAiSpeakingState,
   loadingState,
   messagesState,
+  resumeThreadErrorState,
   sessionIdState,
   sessionState,
   tasklistState,
@@ -72,24 +73,25 @@ const useChatSession = () => {
   const setTokenCount = useSetRecoilState(tokenCountState);
   const [chatProfile, setChatProfile] = useRecoilState(chatProfileState);
   const idToResume = useRecoilValue(threadIdToResumeState);
+  const setThreadResumeError = useSetRecoilState(resumeThreadErrorState);
+
   const [currentThreadId, setCurrentThreadId] =
     useRecoilState(currentThreadIdState);
 
   // Use currentThreadId as thread id in websocket header
   useEffect(() => {
     if (session?.socket) {
-      session.socket.io.opts.extraHeaders!['X-Chainlit-Thread-Id'] =
-        currentThreadId || '';
+      session.socket.auth['threadId'] = currentThreadId || '';
     }
   }, [currentThreadId]);
 
   const _connect = useCallback(
     ({
-      userEnv,
-      accessToken
+      transports,
+      userEnv
     }: {
+      transports?: string[];
       userEnv: Record<string, string>;
-      accessToken?: string;
     }) => {
       const { protocol, host, pathname } = new URL(client.httpEndpoint);
       const uri = `${protocol}//${host}`;
@@ -100,15 +102,14 @@ const useChatSession = () => {
 
       const socket = io(uri, {
         path,
-        extraHeaders: {
-          Authorization: accessToken || '',
-          'X-Chainlit-Client-Type': client.type,
-          'X-Chainlit-Session-Id': sessionId,
-          'X-Chainlit-Thread-Id': idToResume || '',
-          'user-env': JSON.stringify(userEnv),
-          'X-Chainlit-Chat-Profile': chatProfile
-            ? encodeURIComponent(chatProfile)
-            : ''
+        withCredentials: true,
+        transports,
+        auth: {
+          clientType: client.type,
+          sessionId,
+          threadId: idToResume || '',
+          userEnv: JSON.stringify(userEnv),
+          chatProfile: chatProfile ? encodeURIComponent(chatProfile) : ''
         }
       });
       setSession((old) => {
@@ -196,6 +197,10 @@ const useChatSession = () => {
         );
       });
 
+      socket.on('resume_thread_error', (error?: string) => {
+        setThreadResumeError(error);
+      });
+
       socket.on('new_message', (message: IStep) => {
         setMessages((oldMessages) => addMessage(oldMessages, message));
       });
@@ -240,7 +245,7 @@ const useChatSession = () => {
       );
 
       socket.on('ask', ({ msg, spec }, callback) => {
-        setAskUser({ spec, callback });
+        setAskUser({ spec, callback, parentId: msg.parentId });
         setMessages((oldMessages) => addMessage(oldMessages, msg));
 
         setLoading(false);
@@ -322,8 +327,14 @@ const useChatSession = () => {
       socket.on('token_usage', (count: number) => {
         setTokenCount((old) => old + count);
       });
+
+      socket.on('window_message', (data: any) => {
+        if (window.parent) {
+          window.parent.postMessage(data, '*');
+        }
+      });
     },
-    [setSession, sessionId, chatProfile]
+    [setSession, sessionId, idToResume, chatProfile]
   );
 
   const connect = useCallback(debounce(_connect, 200), [_connect]);
