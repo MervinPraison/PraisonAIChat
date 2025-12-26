@@ -1,11 +1,11 @@
-# PraisonAI Chat
+# PraisonAI UI
 
 **Modern AI Agent Interface for PraisonAI**
 
-[![PyPI - Downloads](https://img.shields.io/pypi/dm/praisonai-chat)](https://pypi.org/project/praisonai-chat/)
-[![GitHub Contributors](https://img.shields.io/github/contributors/MervinPraison/PraisonAIChat)](https://github.com/MervinPraison/PraisonAIChat/graphs/contributors)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/praisonai-ui)](https://pypi.org/project/praisonai-ui/)
+[![GitHub Contributors](https://img.shields.io/github/contributors/MervinPraison/PraisonAI-UI)](https://github.com/MervinPraison/PraisonAI-UI/graphs/contributors)
 
-PraisonAI Chat is a powerful, modern chat interface designed for AI agent interactions. Built for the [PraisonAI](https://github.com/MervinPraison/PraisonAI) multi-agent framework.
+PraisonAI UI is a powerful, modern chat interface designed for AI agent interactions. Built for the [PraisonAI](https://github.com/MervinPraison/PraisonAI) multi-agent framework.
 
 ## Features
 
@@ -19,14 +19,14 @@ PraisonAI Chat is a powerful, modern chat interface designed for AI agent intera
 ## Installation
 
 ```sh
-pip install praisonai[chat]
-praisonai chat
+pip install praisonai-ui
+praisonai run app.py
 ```
 
-Or run directly with the CLI:
+Or run directly:
 
 ```sh
-praisonai chat --port 8000
+praisonai run app.py -w
 ```
 
 ## Quick Start
@@ -64,7 +64,7 @@ This starts the chat interface at `http://localhost:8000`.
 
 ## Integration with PraisonAI
 
-PraisonAI Chat integrates seamlessly with the PraisonAI agent framework:
+PraisonAI UI integrates seamlessly with the PraisonAI agent framework:
 
 ```python
 from praisonaiagents import Agent, Task, PraisonAIAgents
