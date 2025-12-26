@@ -13,6 +13,7 @@ venv
 
 .chainlit
 !cypress/e2e/**/*/.chainlit/*
+!backend/.chainlit/*
 chainlit.md
 
 cypress/screenshots

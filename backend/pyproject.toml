@@ -15,7 +15,7 @@ keywords = [
     'multi-agent',
 ]
 description = "Modern AI Agent Chat Interface for PraisonAI"
-authors = ["PraisonAI <contact@praison.ai>"]
+authors = ["praison"]
 license = "Apache-2.0 license"
 repository = "https://github.com/MervinPraison/PraisonAI-UI"
 readme = "README.md"
