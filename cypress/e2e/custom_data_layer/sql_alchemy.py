@@ -1,18 +1,22 @@
+import os
 from typing import Optional
 
-import chainlit.data as cl_data
-from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
-from chainlit.data.storage_clients import AzureStorageClient
-
 import chainlit as cl
+from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
+from chainlit.data.storage_clients.azure import AzureStorageClient
+
+os.environ["CHAINLIT_AUTH_SECRET"] = "SUPER_SECRET"  # nosec B105
 
 storage_client = AzureStorageClient(
     account_url="<your_account_url>", container="<your_container>"
 )
 
-cl_data._data_layer = SQLAlchemyDataLayer(
-    conninfo="<your conninfo>", storage_provider=storage_client
-)
+
+@cl.data_layer
+def data_layer():
+    return SQLAlchemyDataLayer(
+        conninfo="<your conninfo>", storage_provider=storage_client
+    )
 
 
 @cl.on_chat_start

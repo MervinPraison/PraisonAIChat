@@ -9,30 +9,22 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
-        fastapi-version: ['0.110', '0.111', '0.112']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     env:
       BACKEND_DIR: ./backend
     steps:
-      - uses: actions/checkout@v3
-      - uses: ./.github/actions/poetry-python-install
-        name: Install Python, poetry and Python dependencies
-        with:
-          python-version: ${{ matrix.python-version }}
-          poetry-version: 1.8.3
-          poetry-install-args: --with tests --with mypy --with custom-data
-          poetry-working-directory: ${{ env.BACKEND_DIR }}
-      - name: Install fastapi ${{ matrix.fastapi-version }}
-        run: poetry add fastapi@^${{ matrix.fastapi-version}}
-        working-directory: ${{ env.BACKEND_DIR }}
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/pnpm-node-install
         name: Install Node, pnpm and dependencies.
+      - uses: ./.github/actions/uv-python-install
+        name: Install Python, uv and Python dependencies
         with:
-          node-version: 22.7.0
-          pnpm-version: 9.7.0
-          pnpm-install-args: --no-frozen-lockfile
-      - name: Build UI
+          python-version: ${{ matrix.python-version }}
+          extra-dependencies: --extra tests --extra mypy --extra custom-data
+          working-directory: ${{ env.BACKEND_DIR }}
+      - name: Build UI components
         run: pnpm run buildUi
+        timeout-minutes: 5
       - name: Run Pytest
-        run: poetry run pytest --cov=chainlit/
+        run: uv run --no-project pytest --cov=chainlit/
         working-directory: ${{ env.BACKEND_DIR }}

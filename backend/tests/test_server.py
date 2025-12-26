@@ -1,12 +1,22 @@
+import datetime
 import os
+import pathlib
 from pathlib import Path
-from unittest.mock import Mock, create_autospec, mock_open
+from typing import Callable
+from unittest.mock import AsyncMock, Mock, create_autospec, mock_open
 
 import pytest
-from chainlit.auth import get_current_user
-from chainlit.config import APP_ROOT, ChainlitConfig, load_config
-from chainlit.server import app
 from fastapi.testclient import TestClient
+
+from chainlit.auth import get_current_user
+from chainlit.config import (
+    APP_ROOT,
+    ChainlitConfig,
+    SpontaneousFileUploadFeature,
+)
+from chainlit.server import app
+from chainlit.types import AskFileSpec
+from chainlit.user import PersistedUser
 
 
 @pytest.fixture
@@ -15,23 +25,11 @@ def test_client():
 
 
 @pytest.fixture
-def test_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    monkeypatch.setenv("CHAINLIT_ROOT_PATH", str(tmp_path))
-
-    config = load_config()
-
-    monkeypatch.setattr("chainlit.server.config", config)
-
-    return config
-
-
-@pytest.fixture
 def mock_load_translation(test_config: ChainlitConfig, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        test_config, "load_translation", Mock(return_value={"key": "value"})
-    )
+    mock_method = Mock(return_value={"key": "value"})
+    monkeypatch.setattr("chainlit.config.ChainlitConfig.load_translation", mock_method)
 
-    return test_config.load_translation
+    return mock_method
 
 
 def test_project_translations_default_language(
@@ -69,6 +67,18 @@ def test_project_translations_invalid_language(
         "translation" not in response.json()
     )  # It should fall back to default translation
     assert not mock_load_translation.called
+
+
+def test_project_translations_bcp47_language(
+    test_client: TestClient, mock_load_translation: Mock
+):
+    """Regression test for https://github.com/Chainlit/chainlit/issues/1352."""
+
+    response = test_client.get("/project/translations?language=es-419")
+    assert response.status_code == 200
+    assert "translation" in response.json()
+    mock_load_translation.assert_called_once_with("es-419")
+    mock_load_translation.reset_mock()
 
 
 @pytest.fixture
@@ -174,6 +184,24 @@ def test_get_avatar_custom(test_client: TestClient, monkeypatch: pytest.MonkeyPa
     os.remove(custom_avatar_path)
 
 
+def test_get_avatar_with_spaces(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Test with custom avatar."""
+    custom_avatar_path = os.path.join(APP_ROOT, "public", "avatars", "my_assistant.png")
+    os.makedirs(os.path.dirname(custom_avatar_path), exist_ok=True)
+    with open(custom_avatar_path, "wb") as f:
+        f.write(b"fake image data")
+
+    response = test_client.get("/avatars/My Assistant")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/")
+    assert response.content == b"fake image data"
+
+    # Clean up
+    os.remove(custom_avatar_path)
+
+
 def test_get_avatar_non_existent_favicon(
     test_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
@@ -189,7 +217,7 @@ def test_get_avatar_non_existent_favicon(
 
 
 def test_avatar_path_traversal(
-    test_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ):
     """Test to prevent potential path traversal in avatar route on Windows."""
 
@@ -210,6 +238,515 @@ def test_avatar_path_traversal(
     assert response.status_code == 400
 
 
+@pytest.fixture
+def mock_session_get_by_id_patched(mock_session: Mock, monkeypatch: pytest.MonkeyPatch):
+    test_session_id = "test_session_id"
+
+    # Mock the WebsocketSession.get_by_id method to return the mock session
+    monkeypatch.setattr(
+        "chainlit.session.WebsocketSession.get_by_id",
+        lambda session_id: mock_session if session_id == test_session_id else None,
+    )
+
+    return mock_session
+
+
+def test_get_file_success(
+    test_client: TestClient,
+    mock_session_get_by_id_patched: Mock,
+    tmp_path: pathlib.Path,
+    mock_get_current_user: Mock,
+):
+    """
+    Test successful retrieval of a file from a session.
+    """
+    # Set current_user to match session.user
+    mock_get_current_user.return_value = mock_session_get_by_id_patched.user
+
+    # Create test data
+    test_content = b"Test file content"
+    test_file_id = "test_file_id"
+
+    # Create a temporary file with the test content
+    test_file = tmp_path / "test_file"
+    test_file.write_bytes(test_content)
+
+    mock_session_get_by_id_patched.files = {
+        test_file_id: {
+            "id": test_file_id,
+            "path": test_file,
+            "name": "test.txt",
+            "type": "text/plain",
+            "size": len(test_content),
+        }
+    }
+
+    # Make the GET request to retrieve the file
+    response = test_client.get(
+        f"/project/file/{test_file_id}?session_id={mock_session_get_by_id_patched.id}"
+    )
+
+    # Verify the response
+    assert response.status_code == 200
+    assert response.content == test_content
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+def test_get_file_not_existent_file(
+    test_client: TestClient,
+    mock_session_get_by_id_patched: Mock,
+    mock_get_current_user: Mock,
+):
+    """
+    Test retrieval of a non-existing file from a session.
+    """
+    # Set current_user to match session.user
+    mock_get_current_user.return_value = mock_session_get_by_id_patched.user
+
+    # Make the GET request to retrieve the file
+    response = test_client.get("/project/file/test_file_id?session_id=test_session_id")
+
+    # Verify the response
+    assert response.status_code == 404
+
+
+def test_get_file_non_existing_session(
+    test_client: TestClient,
+    tmp_path: pathlib.Path,
+    mock_session_get_by_id_patched: Mock,
+    mock_session: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Test that an unauthenticated user cannot retrieve a file uploaded by an authenticated user.
+    """
+
+    # Attempt to access the file without authentication by providing an invalid session_id
+    response = test_client.get(
+        "/project/file/nonexistent?session_id=unauthenticated_session_id"
+    )
+
+    # Verify the response
+    assert response.status_code == 401  # Unauthorized
+
+
+def test_upload_file_success(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+):
+    """Test successful file upload."""
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Mock the persist_file method to return a known value
+    expected_file_id = "mocked_file_id"
+    mock_session_get_by_id_patched.persist_file = AsyncMock(
+        return_value={
+            "id": expected_file_id,
+            "name": "test_upload.txt",
+            "type": "text/plain",
+            "size": len(file_content),
+        }
+    )
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    # Verify the response
+    assert response.status_code == 200
+    response_data = response.json()
+    assert "id" in response_data
+    assert response_data["id"] == expected_file_id
+    assert response_data["name"] == "test_upload.txt"
+    assert response_data["type"] == "text/plain"
+    assert response_data["size"] == len(file_content)
+
+    # Verify that persist_file was called with the correct arguments
+    mock_session_get_by_id_patched.persist_file.assert_called_once_with(
+        name="test_upload.txt", content=file_content, mime="text/plain"
+    )
+
+
+def test_file_access_by_different_user(
+    test_client: TestClient,
+    mock_session_get_by_id_patched: Mock,
+    persisted_test_user: PersistedUser,
+    tmp_path: pathlib.Path,
+    mock_session_factory: Callable[..., Mock],
+):
+    """Test that a file uploaded by one user cannot be accessed by another user."""
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Mock the persist_file method to return a known value
+    expected_file_id = "mocked_file_id"
+    mock_session_get_by_id_patched.persist_file = AsyncMock(
+        return_value={
+            "id": expected_file_id,
+            "name": "test_upload.txt",
+            "type": "text/plain",
+            "size": len(file_content),
+        }
+    )
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    # Verify the response
+    assert response.status_code == 200
+
+    response_data = response.json()
+    assert "id" in response_data
+    file_id = response_data["id"]
+
+    # Create a second session with a different user
+    second_session = mock_session_factory(
+        id="another_session_id",
+        user=PersistedUser(
+            id="another_user_id",
+            createdAt=datetime.datetime.now().isoformat(),
+            identifier="another_user_identifier",
+        ),
+    )
+
+    # Attempt to access the uploaded file using the second user's session
+    response = test_client.get(
+        f"/project/file/{file_id}?session_id={second_session.id}"
+    )
+
+    # Verify that the access attempt fails
+    assert response.status_code == 401  # Unauthorized
+
+
+def test_upload_file_missing_file(
+    test_client: TestClient,
+    mock_session: Mock,
+):
+    """Test file upload with missing file in the request."""
+
+    # Make the POST request without a file
+    response = test_client.post(
+        "/project/file",
+        data={"session_id": mock_session.id},
+    )
+
+    # Verify the response
+    assert response.status_code == 422  # Unprocessable Entity
+    assert "detail" in response.json()
+
+
+def test_upload_file_invalid_session(
+    test_client: TestClient,
+):
+    """Test file upload with an invalid session."""
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Make the POST request with an invalid session_id
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        data={"session_id": "invalid_session_id"},
+    )
+
+    # Verify the response
+    assert response.status_code == 422
+
+
+def test_upload_file_unauthorized(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+):
+    """Test file upload without proper authorization."""
+
+    # Mock the upload_file_session to have no user
+    mock_session_get_by_id_patched.user = None
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        data={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    assert response.status_code == 422
+
+
+def test_upload_file_disabled(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test file upload being disabled by config."""
+
+    # Set accept in config
+    monkeypatch.setattr(
+        test_config.features,
+        "spontaneous_file_upload",
+        SpontaneousFileUploadFeature(enabled=False),
+    )
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    # Verify the response
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("accept_pattern", "mime_type", "expected_status"),
+    [
+        ({"image/*": [".png", ".gif", ".jpeg", ".jpg"]}, "image/jpeg", 400),
+        (["image/*"], "text/plain", 400),
+        (["image/*", "application/*"], "text/plain", 400),
+        (["image/png", "application/pdf"], "image/jpeg", 400),
+        (["text/*"], "text/plain", 200),
+        (["application/*"], "application/pdf", 200),
+        (["image/*"], "image/jpeg", 200),
+        (["image/*", "text/*"], "text/plain", 200),
+        (["*/*"], "text/plain", 200),
+        (["*/*"], "image/jpeg", 200),
+        (["*/*"], "application/pdf", 200),
+        (["image/*", "application/*"], "application/pdf", 200),
+        (["image/*", "application/*"], "image/jpeg", 200),
+        (["image/png", "application/pdf"], "image/png", 200),
+        (["image/png", "application/pdf"], "application/pdf", 200),
+        ({"image/*": []}, "image/jpeg", 200),
+        (
+            {"image/*": [".png", ".gif", ".jpeg", ".jpg"]},
+            "text/plain",
+            400,
+        ),  # mime type not allowed
+        (
+            {"*/*": [".txt", ".gif", ".jpeg", ".jpg"]},
+            "text/plain",
+            200,
+        ),  # extension allowed
+        (
+            {"*/*": [".gif", ".jpeg", ".jpg"]},
+            "text/plain",
+            400,
+        ),  # extension not allowed
+    ],
+)
+def test_upload_file_mime_type_check(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    accept_pattern: list[str],
+    mime_type: str,
+    expected_status: int,
+):
+    """Test check of mime_type."""
+
+    # Set accept in config
+    monkeypatch.setattr(
+        test_config.features,
+        "spontaneous_file_upload",
+        SpontaneousFileUploadFeature(enabled=True, accept=accept_pattern),
+    )
+
+    # Prepare the files to upload
+    file_content = b"Sample file content"
+    files = {
+        "file": ("test_upload.txt", file_content, mime_type),
+    }
+
+    # Mock the persist_file method to return a known value
+    expected_file_id = "mocked_file_id"
+    mock_session_get_by_id_patched.persist_file = AsyncMock(
+        return_value={
+            "id": expected_file_id,
+            "name": "test_upload.txt",
+            "type": "text/plain",
+            "size": len(file_content),
+        }
+    )
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    # Verify the response
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    ("file_content", "content_multiplier", "max_size_mb", "expected_status"),
+    [
+        (b"1", 1, 1, 200),
+        (b"11", 1024 * 1024, 1, 400),
+    ],
+)
+def test_upload_file_size_check(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    file_content: bytes,
+    content_multiplier: int,
+    max_size_mb: int,
+    expected_status: int,
+):
+    """Test check of max_size_mb."""
+
+    file_content = file_content * content_multiplier
+
+    # Set accept in config
+    monkeypatch.setattr(
+        test_config.features,
+        "spontaneous_file_upload",
+        SpontaneousFileUploadFeature(max_size_mb=max_size_mb, enabled=True),
+    )
+
+    # Prepare the files to upload
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    # Mock the persist_file method to return a known value
+    expected_file_id = "mocked_file_id"
+    mock_session_get_by_id_patched.persist_file = AsyncMock(
+        return_value={
+            "id": expected_file_id,
+            "name": "test_upload.txt",
+            "type": "text/plain",
+            "size": len(file_content),
+        }
+    )
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={"session_id": mock_session_get_by_id_patched.id},
+    )
+
+    # Verify the response
+    assert response.status_code == expected_status
+
+
+@pytest.mark.parametrize(
+    (
+        "file_content",
+        "content_multiplier",
+        "max_size_mb",
+        "parent_id",
+        "expected_status",
+        "accept",
+    ),
+    [
+        (b"1", 1, 1, "mocked_parent_id", 200, ["text/plain"]),
+        (b"11", 1024 * 1024, 1, "mocked_parent_id", 400, ["text/plain"]),
+        (b"11", 1, 1, "invalid_parent_id", 404, ["text/plain"]),
+        (b"11", 1, 1, "mocked_parent_id", 400, ["image/gif"]),
+    ],
+)
+def test_ask_file_with_spontaneous_upload_disabled(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    mock_session_get_by_id_patched: Mock,
+    monkeypatch: pytest.MonkeyPatch,
+    file_content: bytes,
+    content_multiplier: int,
+    max_size_mb: int,
+    parent_id: str,
+    expected_status: int,
+    accept: list[str],
+):
+    """Test file upload being disabled by config."""
+
+    # Set accept in config
+    monkeypatch.setattr(
+        test_config.features,
+        "spontaneous_file_upload",
+        SpontaneousFileUploadFeature(enabled=False),
+    )
+
+    # Prepare the files to upload
+    file_content = file_content * content_multiplier
+    files = {
+        "file": ("test_upload.txt", file_content, "text/plain"),
+    }
+
+    expected_file_id = "mocked_file_id"
+    mock_session_get_by_id_patched.persist_file = AsyncMock(
+        return_value={
+            "id": expected_file_id,
+            "name": "test_upload.txt",
+            "type": "text/plain",
+            "size": len(file_content),
+        }
+    )
+
+    mock_session_get_by_id_patched.files_spec = {
+        "mocked_parent_id": AskFileSpec(
+            step_id="mocked_file_spec",
+            timeout=1,
+            type="file",
+            accept=accept,
+            max_files=1,
+            max_size_mb=max_size_mb,
+        )
+    }
+
+    # Make the POST request to upload the file
+    response = test_client.post(
+        "/project/file",
+        files=files,
+        params={
+            "session_id": mock_session_get_by_id_patched.id,
+            "ask_parent_id": parent_id,
+        },
+    )
+
+    # Verify the response
+    assert response.status_code == expected_status
+
+
 def test_project_translations_file_path_traversal(
     test_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
@@ -228,3 +765,341 @@ def test_project_translations_file_path_traversal(
 
     # Should give error status
     assert response.status_code == 422
+
+
+def test_project_settings_with_chat_profile_config_overrides(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that /project/settings endpoint returns merged configuration when chat_profile is specified."""
+    from chainlit.config import (
+        ChainlitConfigOverrides,
+        FeaturesSettings,
+        McpFeature,
+        UISettings,
+    )
+    from chainlit.types import ChatProfile
+
+    # Mock chat profiles with different config overrides
+    mock_profiles = [
+        ChatProfile(
+            name="basic",
+            markdown_description="Basic profile without overrides",
+            default=True,
+        ),
+        ChatProfile(
+            name="mcp-enabled",
+            markdown_description="Profile with MCP enabled",
+            config_overrides=ChainlitConfigOverrides(
+                features=FeaturesSettings(mcp=McpFeature(enabled=True)),
+                ui=UISettings(name="MCP Assistant", default_theme="dark"),
+            ),
+        ),
+        ChatProfile(
+            name="light-theme",
+            markdown_description="Profile with light theme",
+            config_overrides=ChainlitConfigOverrides(
+                ui=UISettings(
+                    name="Light Theme App",
+                    default_theme="light",
+                    description="Light theme app",
+                )
+            ),
+        ),
+    ]
+
+    # Mock the chat profiles callback
+    async def mock_get_chat_profiles(user, language):
+        # Use asyncio.sleep to make this truly async
+        import asyncio
+
+        await asyncio.sleep(0)
+        return mock_profiles
+
+    test_config.code.set_chat_profiles = mock_get_chat_profiles
+
+    # Test 1: Default profile (no overrides)
+    response = test_client.get("/project/settings", params={"chat_profile": "basic"})
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Should return base configuration without overrides
+    assert config_data["ui"]["name"] == test_config.ui.name  # Original name
+    assert (
+        config_data["features"]["mcp"]["enabled"] == test_config.features.mcp.enabled
+    )  # Original MCP setting
+
+    # Test 2: MCP-enabled profile
+    response = test_client.get(
+        "/project/settings", params={"chat_profile": "mcp-enabled"}
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Should return merged configuration with MCP enabled and custom UI
+    assert config_data["features"]["mcp"]["enabled"] is True  # Overridden
+    assert config_data["ui"]["name"] == "MCP Assistant"  # Overridden
+    assert config_data["ui"]["default_theme"] == "dark"  # Overridden
+
+    # Test 3: Light theme profile
+    response = test_client.get(
+        "/project/settings", params={"chat_profile": "light-theme"}
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Should return merged configuration with light theme
+    assert config_data["ui"]["default_theme"] == "light"  # Overridden
+    assert config_data["ui"]["description"] == "Light theme app"  # Overridden
+    assert (
+        config_data["features"]["mcp"]["enabled"] == test_config.features.mcp.enabled
+    )  # Not overridden
+
+    # Test 4: Non-existent profile (should return base config)
+    response = test_client.get(
+        "/project/settings", params={"chat_profile": "non-existent"}
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Should return base configuration
+    assert config_data["ui"]["name"] == test_config.ui.name
+    assert config_data["features"]["mcp"]["enabled"] == test_config.features.mcp.enabled
+
+    # Test 5: No profile specified (should return base config)
+    response = test_client.get("/project/settings")
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Should return base configuration
+    assert config_data["ui"]["name"] == test_config.ui.name
+    assert config_data["features"]["mcp"]["enabled"] == test_config.features.mcp.enabled
+
+
+def test_project_settings_config_overrides_serialization(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that config_overrides field is not included in serialized chat profiles."""
+    from chainlit.config import ChainlitConfigOverrides, FeaturesSettings, McpFeature
+    from chainlit.types import ChatProfile
+
+    # Mock chat profile with config overrides
+    mock_profile = ChatProfile(
+        name="test-profile",
+        markdown_description="Test profile",
+        config_overrides=ChainlitConfigOverrides(
+            features=FeaturesSettings(mcp=McpFeature(enabled=True))
+        ),
+    )
+
+    async def mock_get_chat_profiles(user, language):
+        # Use asyncio.sleep to make this truly async
+        import asyncio
+
+        await asyncio.sleep(0)
+        return [mock_profile]
+
+    test_config.code.set_chat_profiles = mock_get_chat_profiles
+
+    # Get the project settings
+    response = test_client.get(
+        "/project/settings", params={"chat_profile": "test-profile"}
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Check that chatProfiles are included in the response
+    assert "chatProfiles" in config_data
+    assert len(config_data["chatProfiles"]) == 1
+
+    # Check that config_overrides is NOT included in the serialized profile
+    profile_data = config_data["chatProfiles"][0]
+    assert "config_overrides" not in profile_data
+    assert profile_data["name"] == "test-profile"
+    assert profile_data["markdown_description"] == "Test profile"
+
+
+def test_project_settings_config_overrides_language(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test that localized chat profiles use the right config overrides."""
+    from chainlit.config import ChainlitConfigOverrides, FeaturesSettings, McpFeature
+    from chainlit.types import ChatProfile
+
+    # Mock chat profile with config overrides
+    mock_profile_fr = ChatProfile(
+        name="test-profile-fr",
+        markdown_description="Test profil",
+        config_overrides=ChainlitConfigOverrides(
+            features=FeaturesSettings(mcp=McpFeature(enabled=True))
+        ),
+    )
+
+    mock_profile_en = ChatProfile(
+        name="test-profile",
+        markdown_description="Test profile",
+        config_overrides=ChainlitConfigOverrides(
+            features=FeaturesSettings(mcp=McpFeature(enabled=False))
+        ),
+    )
+
+    async def mock_get_chat_profiles(user, language):
+        # Use asyncio.sleep to make this truly async
+        import asyncio
+
+        await asyncio.sleep(0)
+        if language == "fr-CA":
+            return [mock_profile_fr]
+
+        return [mock_profile_en]
+
+    test_config.code.set_chat_profiles = mock_get_chat_profiles
+
+    # Get the project settings in French
+    response = test_client.get(
+        "/project/settings",
+        params={"language": "fr-CA", "chat_profile": "test-profile-fr"},
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Check that chatProfiles are included in the response
+    assert "chatProfiles" in config_data
+    assert len(config_data["chatProfiles"]) == 1
+
+    # Check that config_overrides is NOT included in the serialized profile
+    assert config_data["features"]["mcp"]["enabled"] is True  # Overridden
+
+    # Check that the profile_data matches the selected profile.
+    profile_data = config_data["chatProfiles"][0]
+    assert "config_overrides" not in profile_data
+    assert profile_data["name"] == "test-profile-fr"
+    assert profile_data["markdown_description"] == "Test profil"
+
+    # Get the project settings in English
+    response = test_client.get(
+        "/project/settings",
+        params={"language": "en-US", "chat_profile": "test-profile"},
+    )
+    assert response.status_code == 200
+    config_data = response.json()
+
+    # Check that chatProfiles are included in the response
+    assert "chatProfiles" in config_data
+    assert len(config_data["chatProfiles"]) == 1
+
+    # Check that config_overrides is NOT included in the serialized profile
+    assert config_data["features"]["mcp"]["enabled"] is False  # Overridden
+
+    # Check that the profile_data matches the selected profile.
+    profile_data = config_data["chatProfiles"][0]
+    assert "config_overrides" not in profile_data
+    assert profile_data["name"] == "test-profile"
+    assert profile_data["markdown_description"] == "Test profile"
+
+
+def test_project_settings_thread_sharing_flag(
+    test_client: TestClient,
+    test_config: ChainlitConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Start with both disabled
+    test_config.features.allow_thread_sharing = False
+    test_config.code.on_shared_thread_view = None
+    resp = test_client.get("/project/settings")
+    assert resp.status_code == 200
+    assert resp.json().get("threadSharing") is False
+
+    # Enable flag only -> still False (callback missing)
+    test_config.features.allow_thread_sharing = True
+    test_config.code.on_shared_thread_view = None
+    resp = test_client.get("/project/settings")
+    assert resp.status_code == 200
+    assert resp.json().get("threadSharing") is False
+
+    # Enable callback only -> still False (flag disabled)
+    test_config.features.allow_thread_sharing = False
+
+    def dummy_cb(*args, **kwargs):
+        return True
+
+    test_config.code.on_shared_thread_view = dummy_cb
+    resp = test_client.get("/project/settings")
+    assert resp.status_code == 200
+    assert resp.json().get("threadSharing") is False
+
+    # Enable both -> True
+    test_config.features.allow_thread_sharing = True
+    test_config.code.on_shared_thread_view = dummy_cb
+    resp = test_client.get("/project/settings")
+    assert resp.status_code == 200
+    assert resp.json().get("threadSharing") is True
+
+
+def test_share_thread_endpoint_sets_flags(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Override current user to match thread author
+    from chainlit.server import app as _app, get_current_user as _get_current_user
+
+    author = PersistedUser(
+        id="u1",
+        createdAt=datetime.datetime.now().isoformat(),
+        identifier="author",
+    )
+
+    _app.dependency_overrides[_get_current_user] = lambda: author
+
+    # Mock data layer
+    from unittest.mock import AsyncMock
+
+    dl = AsyncMock()
+    dl.get_thread.return_value = {
+        "id": "t1",
+        "name": "Thread 1",
+        "userIdentifier": "author",
+        "metadata": {"other": True},
+    }
+    dl.get_thread_author.return_value = "author"
+    dl.build_debug_url.return_value = ""
+
+    # Ensure data layer is initialized for both server routes and ACL checks
+    import chainlit.data as data_mod
+
+    data_mod._data_layer = dl
+    data_mod._data_layer_initialized = True
+
+    # Share
+    r = test_client.put(
+        "/project/thread/share", json={"threadId": "t1", "isShared": True}
+    )
+    assert r.status_code == 200
+
+    # Validate metadata passed to update_thread includes is_shared and shared_at
+    assert dl.update_thread.await_count >= 1
+    _, kwargs = dl.update_thread.await_args
+    assert kwargs.get("thread_id") == "t1"
+    meta = kwargs.get("metadata") or {}
+    assert meta.get("is_shared") is True
+    assert isinstance(meta.get("shared_at"), str)
+
+    # Unshare
+    r = test_client.put(
+        "/project/thread/share", json={"threadId": "t1", "isShared": False}
+    )
+    assert r.status_code == 200
+    _, kwargs = dl.update_thread.await_args
+    meta = kwargs.get("metadata") or {}
+    assert meta.get("is_shared") is False
+    assert "shared_at" not in meta
+
+    # Cleanup override and data layer
+    del _app.dependency_overrides[_get_current_user]
+    data_mod._data_layer = None
+    data_mod._data_layer_initialized = False

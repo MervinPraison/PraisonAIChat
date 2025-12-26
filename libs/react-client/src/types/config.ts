@@ -2,12 +2,14 @@ export interface IStarter {
   label: string;
   message: string;
   icon?: string;
+  command?: string;
 }
 
 export interface ChatProfile {
   default: boolean;
   icon?: string;
   name: string;
+  display_name?: string;
   markdown_description: string;
   starters?: IStarter[];
 }
@@ -22,6 +24,8 @@ export interface IAuthConfig {
   passwordAuth: boolean;
   headerAuth: boolean;
   oauthProviders: string[];
+  default_theme?: 'light' | 'dark';
+  ui?: IChainlitConfig['ui'];
 }
 
 export interface IChainlitConfig {
@@ -29,14 +33,28 @@ export interface IChainlitConfig {
   ui: {
     name: string;
     description?: string;
+    default_theme?: 'light' | 'dark';
+    layout?: 'default' | 'wide';
+    default_sidebar_state?: 'open' | 'closed';
     cot: 'hidden' | 'tool_call' | 'full';
-    default_collapse_content?: boolean;
     github?: string;
-    theme: any;
     custom_css?: string;
     custom_js?: string;
     custom_font?: string;
+    alert_style?: 'classic' | 'modern';
+    login_page_image?: string;
+    login_page_image_filter?: string;
+    login_page_image_dark_filter?: string;
     custom_meta_image_url?: string;
+    logo_file_url?: string;
+    default_avatar_file_url?: string;
+    header_links?: {
+      name: string;
+      display_name: string;
+      icon_url: string;
+      url: string;
+      target?: '_blank' | '_self' | '_parent' | '_top';
+    }[];
   };
   features: {
     spontaneous_file_upload?: {
@@ -47,14 +65,31 @@ export interface IChainlitConfig {
     };
     audio: IAudioConfig;
     unsafe_allow_html?: boolean;
+    user_message_autoscroll?: boolean;
+    assistant_message_autoscroll?: boolean;
     latex?: boolean;
     edit_message?: boolean;
+    mcp?: {
+      enabled?: boolean;
+      sse?: {
+        enabled?: boolean;
+      };
+      streamable_http?: {
+        enabled?: boolean;
+      };
+      stdio?: {
+        enabled?: boolean;
+      };
+    };
   };
   debugUrl?: string;
   userEnv: string[];
+  maskUserEnv?: boolean;
   dataPersistence: boolean;
   threadResumable: boolean;
+  threadSharing?: boolean;
   chatProfiles: ChatProfile[];
   starters?: IStarter[];
+
   translation: object;
 }

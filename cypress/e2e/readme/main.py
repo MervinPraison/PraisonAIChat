@@ -1,1 +1,6 @@
-import chainlit as cl  # noqa: F401
+import chainlit as cl
+
+
+@cl.on_message
+async def on_message(msg):
+    pass

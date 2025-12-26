@@ -4,9 +4,12 @@ import urllib.parse
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+from fastapi import HTTPException
+
 from chainlit.secret import random_secret
 from chainlit.user import User
-from fastapi import HTTPException
+
+ACCESS_TOKEN_MISSING = "Access token missing in the response"
 
 
 class OAuthProvider:
@@ -16,31 +19,60 @@ class OAuthProvider:
     client_secret: str
     authorize_url: str
     authorize_params: Dict[str, str]
+    default_prompt: Optional[str] = None
 
     def is_configured(self):
         return all([os.environ.get(env) for env in self.env])
 
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
+        raise NotImplementedError
+
     async def get_token(self, code: str, url: str) -> str:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     async def get_user_info(self, token: str) -> Tuple[Dict[str, str], User]:
-        raise NotImplementedError()
+        raise NotImplementedError
+
+    def get_env_prefix(self) -> str:
+        """Return environment prefix, like AZURE_AD."""
+
+        return self.id.replace("-", "_").upper()
+
+    def get_prompt(self) -> Optional[str]:
+        """Return OAuth prompt param."""
+        if prompt := os.environ.get(f"OAUTH_{self.get_env_prefix()}_PROMPT"):
+            return prompt
+
+        if prompt := os.environ.get("OAUTH_PROMPT"):
+            return prompt
+
+        return self.default_prompt
 
 
 class GithubOAuthProvider(OAuthProvider):
     id = "github"
     env = ["OAUTH_GITHUB_CLIENT_ID", "OAUTH_GITHUB_CLIENT_SECRET"]
-    authorize_url = "https://github.com/login/oauth/authorize"
+    authorize_url = os.environ.get(
+        "OAUTH_GITHUB_AUTH_URL", "https://github.com/login/oauth/authorize"
+    )
+    token_url = os.environ.get(
+        "OAUTH_GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"
+    )
+    user_info_url = os.environ.get(
+        "OAUTH_GITHUB_USER_INFO_URL", "https://api.github.com/user"
+    )
 
     def __init__(self):
         self.client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID")
         self.client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET")
         self.authorize_params = {
             "scope": "user:email",
-            "prompt": "consent",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> Dict[str, List[str]]:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -48,29 +80,30 @@ class GithubOAuthProvider(OAuthProvider):
         }
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://github.com/login/oauth/access_token",
+                self.token_url,
                 data=payload,
             )
             response.raise_for_status()
-            content = urllib.parse.parse_qs(response.text)
-            token = content.get("access_token", [""])[0]
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+            return urllib.parse.parse_qs(response.text)
+
+    async def get_token(self, code: str, url: str):
+        content = await self.get_raw_token_response(code, url)
+        token = content.get("access_token", [""])[0]
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
             user_response = await client.get(
-                "https://api.github.com/user",
+                self.user_info_url,
                 headers={"Authorization": f"token {token}"},
             )
             user_response.raise_for_status()
             github_user = user_response.json()
 
             emails_response = await client.get(
-                "https://api.github.com/user/emails",
+                urllib.parse.urljoin(self.user_info_url + "/", "emails"),
                 headers={"Authorization": f"token {token}"},
             )
             emails_response.raise_for_status()
@@ -96,10 +129,12 @@ class GoogleOAuthProvider(OAuthProvider):
             "scope": "https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email",
             "response_type": "code",
             "access_type": "offline",
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -113,15 +148,14 @@ class GoogleOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json = response.json()
-            token = json.get("access_token")
-            if not token:
-                raise httpx.HTTPStatusError(
-                    "Failed to get the access token",
-                    request=response.request,
-                    response=response,
-                )
-            return token
+            return response.json()
+
+    async def get_token(self, code: str, url: str):
+        json = await self.get_raw_token_response(code, url)
+        token = json.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -162,12 +196,14 @@ class AzureADOAuthProvider(OAuthProvider):
         self.authorize_params = {
             "tenant": os.environ.get("OAUTH_AZURE_AD_TENANT_ID"),
             "response_type": "code",
-            "scope": "https://graph.microsoft.com/User.Read",
+            "scope": "https://graph.microsoft.com/User.Read offline_access",
             "response_mode": "query",
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -181,14 +217,17 @@ class AzureADOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json = response.json()
+            return response.json()
 
-            token = json["access_token"]
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+    async def get_token(self, code: str, url: str):
+        json = await self.get_raw_token_response(code, url)
+
+        token = json["access_token"]
+        refresh_token = json.get("refresh_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        self._refresh_token = refresh_token
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -216,7 +255,11 @@ class AzureADOAuthProvider(OAuthProvider):
 
             user = User(
                 identifier=azure_user["userPrincipalName"],
-                metadata={"image": azure_user.get("image"), "provider": "azure-ad"},
+                metadata={
+                    "image": azure_user.get("image"),
+                    "provider": "azure-ad",
+                    "refresh_token": getattr(self, "_refresh_token", None),
+                },
             )
             return (azure_user, user)
 
@@ -246,13 +289,15 @@ class AzureADHybridOAuthProvider(OAuthProvider):
         self.authorize_params = {
             "tenant": os.environ.get("OAUTH_AZURE_AD_HYBRID_TENANT_ID"),
             "response_type": "code id_token",
-            "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/openid",
+            "scope": "https://graph.microsoft.com/User.Read https://graph.microsoft.com/openid offline_access",
             "response_mode": "form_post",
             "nonce": nonce,
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -266,14 +311,17 @@ class AzureADHybridOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json = response.json()
+            return response.json()
 
-            token = json["access_token"]
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+    async def get_token(self, code: str, url: str):
+        json = await self.get_raw_token_response(code, url)
+
+        token = json["access_token"]
+        refresh_token = json.get("refresh_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        self._refresh_token = refresh_token
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -301,7 +349,11 @@ class AzureADHybridOAuthProvider(OAuthProvider):
 
             user = User(
                 identifier=azure_user["userPrincipalName"],
-                metadata={"image": azure_user.get("image"), "provider": "azure-ad"},
+                metadata={
+                    "image": azure_user.get("image"),
+                    "provider": "azure-ad",
+                    "refresh_token": getattr(self, "_refresh_token", None),
+                },
             )
             return (azure_user, user)
 
@@ -329,8 +381,10 @@ class OktaOAuthProvider(OAuthProvider):
             "response_type": "code",
             "scope": "openid profile email",
             "response_mode": "query",
-            "prompt": "login",
         }
+
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
 
     def get_authorization_server_path(self):
         if not self.authorization_server_id:
@@ -339,7 +393,7 @@ class OktaOAuthProvider(OAuthProvider):
             return ""
         return f"/{self.authorization_server_id}"
 
-    async def get_token(self, code: str, url: str):
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -353,16 +407,14 @@ class OktaOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json_data = response.json()
+            return response.json()
 
-            token = json_data.get("access_token")
-            if not token:
-                raise httpx.HTTPStatusError(
-                    "Failed to get the access token",
-                    request=response.request,
-                    response=response,
-                )
-            return token
+    async def get_token(self, code: str, url: str):
+        json_data = await self.get_raw_token_response(code, url)
+        token = json_data.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -401,10 +453,12 @@ class Auth0OAuthProvider(OAuthProvider):
             "response_type": "code",
             "scope": "openid profile email",
             "audience": f"{self.original_domain}/userinfo",
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -418,13 +472,14 @@ class Auth0OAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json_content = response.json()
-            token = json_content.get("access_token")
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+            return response.json()
+
+    async def get_token(self, code: str, url: str):
+        json_content = await self.get_raw_token_response(code, url)
+        token = json_content.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -459,10 +514,12 @@ class DescopeOAuthProvider(OAuthProvider):
             "response_type": "code",
             "scope": "openid profile email",
             "audience": f"{self.domain}/userinfo",
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -476,15 +533,14 @@ class DescopeOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json_content = response.json()
-            token = json_content.get("access_token")
-            if not token:
-                raise httpx.HTTPStatusError(
-                    "Failed to get the access token",
-                    request=response.request,
-                    response=response,
-                )
-            return token
+            return response.json()
+
+    async def get_token(self, code: str, url: str):
+        json_content = await self.get_raw_token_response(code, url)
+        token = json_content.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -514,14 +570,17 @@ class AWSCognitoOAuthProvider(OAuthProvider):
     def __init__(self):
         self.client_id = os.environ.get("OAUTH_COGNITO_CLIENT_ID")
         self.client_secret = os.environ.get("OAUTH_COGNITO_CLIENT_SECRET")
+        self.scopes = os.environ.get("OAUTH_COGNITO_SCOPE", "openid profile email")
         self.authorize_params = {
             "response_type": "code",
             "client_id": self.client_id,
-            "scope": "openid profile email",
-            "prompt": "login",
+            "scope": self.scopes,
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -535,14 +594,14 @@ class AWSCognitoOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json = response.json()
+            return response.json()
 
-            token = json.get("access_token")
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+    async def get_token(self, code: str, url: str):
+        json = await self.get_raw_token_response(code, url)
+        token = json.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         user_info_url = (
@@ -587,10 +646,12 @@ class GitlabOAuthProvider(OAuthProvider):
         self.authorize_params = {
             "scope": "openid profile email",
             "response_type": "code",
-            "prompt": "login",
         }
 
-    async def get_token(self, code: str, url: str):
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
@@ -604,13 +665,14 @@ class GitlabOAuthProvider(OAuthProvider):
                 data=payload,
             )
             response.raise_for_status()
-            json_content = response.json()
-            token = json_content.get("access_token")
-            if not token:
-                raise HTTPException(
-                    status_code=400, detail="Failed to get the access token"
-                )
-            return token
+            return response.json()
+
+    async def get_token(self, code: str, url: str):
+        json_content = await self.get_raw_token_response(code, url)
+        token = json_content.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
 
     async def get_user_info(self, token: str):
         async with httpx.AsyncClient() as client:
@@ -630,6 +692,138 @@ class GitlabOAuthProvider(OAuthProvider):
             return (gitlab_user, user)
 
 
+class KeycloakOAuthProvider(OAuthProvider):
+    env = [
+        "OAUTH_KEYCLOAK_CLIENT_ID",
+        "OAUTH_KEYCLOAK_CLIENT_SECRET",
+        "OAUTH_KEYCLOAK_REALM",
+        "OAUTH_KEYCLOAK_BASE_URL",
+    ]
+    id = os.environ.get("OAUTH_KEYCLOAK_NAME", "keycloak")
+
+    def __init__(self):
+        self.refresh_token = None
+        self.client_id = os.environ.get("OAUTH_KEYCLOAK_CLIENT_ID")
+        self.client_secret = os.environ.get("OAUTH_KEYCLOAK_CLIENT_SECRET")
+        self.realm = os.environ.get("OAUTH_KEYCLOAK_REALM")
+        self.base_url = os.environ.get("OAUTH_KEYCLOAK_BASE_URL")
+        self.authorize_url = (
+            f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/auth"
+        )
+
+        self.authorize_params = {
+            "scope": "profile email openid",
+            "response_type": "code",
+        }
+
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
+        payload = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": url,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/token",
+                data=payload,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_token(self, code: str, url: str):
+        json = await self.get_raw_token_response(code, url)
+        token = json.get("access_token")
+        refresh_token = json.get("refresh_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        self.refresh_token = refresh_token
+        return token
+
+    async def get_user_info(self, token: str):
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/userinfo",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            kc_user = response.json()
+            user = User(
+                identifier=kc_user["email"],
+                metadata={"provider": "keycloak"},
+            )
+            return (kc_user, user)
+
+
+class GenericOAuthProvider(OAuthProvider):
+    env = [
+        "OAUTH_GENERIC_CLIENT_ID",
+        "OAUTH_GENERIC_CLIENT_SECRET",
+        "OAUTH_GENERIC_AUTH_URL",
+        "OAUTH_GENERIC_TOKEN_URL",
+        "OAUTH_GENERIC_USER_INFO_URL",
+        "OAUTH_GENERIC_SCOPES",
+    ]
+    id = os.environ.get("OAUTH_GENERIC_NAME", "generic")
+
+    def __init__(self):
+        self.client_id = os.environ.get("OAUTH_GENERIC_CLIENT_ID")
+        self.client_secret = os.environ.get("OAUTH_GENERIC_CLIENT_SECRET")
+        self.authorize_url = os.environ.get("OAUTH_GENERIC_AUTH_URL")
+        self.token_url = os.environ.get("OAUTH_GENERIC_TOKEN_URL")
+        self.user_info_url = os.environ.get("OAUTH_GENERIC_USER_INFO_URL")
+        self.scopes = os.environ.get("OAUTH_GENERIC_SCOPES")
+        self.user_identifier = os.environ.get("OAUTH_GENERIC_USER_IDENTIFIER", "email")
+
+        self.authorize_params = {
+            "scope": self.scopes,
+            "response_type": "code",
+        }
+
+        if prompt := self.get_prompt():
+            self.authorize_params["prompt"] = prompt
+
+    async def get_raw_token_response(self, code: str, url: str) -> dict:
+        payload = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": url,
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(self.token_url, data=payload)
+            response.raise_for_status()
+            return response.json()
+
+    async def get_token(self, code: str, url: str) -> str:
+        json = await self.get_raw_token_response(code, url)
+        token = json.get("access_token")
+        if not token:
+            raise HTTPException(status_code=400, detail=ACCESS_TOKEN_MISSING)
+        return token
+
+    async def get_user_info(self, token: str):
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                self.user_info_url,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            response.raise_for_status()
+            server_user = response.json()
+            user = User(
+                identifier=server_user.get(self.user_identifier),
+                metadata={
+                    "provider": self.id,
+                },
+            )
+            return (server_user, user)
+
+
 providers = [
     GithubOAuthProvider(),
     GoogleOAuthProvider(),
@@ -640,6 +834,8 @@ providers = [
     DescopeOAuthProvider(),
     AWSCognitoOAuthProvider(),
     GitlabOAuthProvider(),
+    KeycloakOAuthProvider(),
+    GenericOAuthProvider(),
 ]
 
 

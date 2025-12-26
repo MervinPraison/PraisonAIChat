@@ -5,14 +5,17 @@ import os
 import random
 from dataclasses import asdict
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import aiofiles
 import aiohttp
 import boto3  # type: ignore
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+
 from chainlit.context import context
-from chainlit.data.base import BaseDataLayer, BaseStorageClient
+from chainlit.data.base import BaseDataLayer
+from chainlit.data.storage_clients.base import BaseStorageClient
 from chainlit.data.utils import queue_until_user_message
 from chainlit.element import ElementDict
 from chainlit.logger import logger
@@ -28,8 +31,9 @@ from chainlit.types import (
 from chainlit.user import PersistedUser, User
 
 if TYPE_CHECKING:
-    from chainlit.element import Element
     from mypy_boto3_dynamodb import DynamoDBClient
+
+    from chainlit.element import Element
 
 
 _logger = logger.getChild("DynamoDB")
@@ -60,14 +64,35 @@ class DynamoDBDataLayer(BaseDataLayer):
     def _get_current_timestamp(self) -> str:
         return datetime.now().isoformat() + "Z"
 
-    def _serialize_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _serialize_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        def convert_floats(obj):
+            if isinstance(obj, float):
+                return Decimal(str(obj))
+            elif isinstance(obj, dict):
+                return {k: convert_floats(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_floats(v) for v in obj]
+            else:
+                return obj
+
         return {
-            key: self._type_serializer.serialize(value) for key, value in item.items()
+            key: self._type_serializer.serialize(convert_floats(value))
+            for key, value in item.items()
         }
 
-    def _deserialize_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _deserialize_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        def convert_decimals(obj):
+            if isinstance(obj, Decimal):
+                return float(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_decimals(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_decimals(v) for v in obj]
+            else:
+                return obj
+
         return {
-            key: self._type_deserializer.deserialize(value)
+            key: convert_decimals(self._type_deserializer.deserialize(value))
             for key, value in item.items()
         }
 
@@ -401,7 +426,7 @@ class DynamoDBDataLayer(BaseDataLayer):
 
         BATCH_ITEM_SIZE = 25  # pylint: disable=invalid-name
         for i in range(0, len(delete_requests), BATCH_ITEM_SIZE):
-            chunk = delete_requests[i : i + BATCH_ITEM_SIZE]  # noqa: E203
+            chunk = delete_requests[i : i + BATCH_ITEM_SIZE]
             response = self.client.batch_write_item(
                 RequestItems={
                     self.table_name: chunk,  # type: ignore
@@ -409,7 +434,7 @@ class DynamoDBDataLayer(BaseDataLayer):
             )
 
             backoff_time = 1
-            while "UnprocessedItems" in response and response["UnprocessedItems"]:
+            while response.get("UnprocessedItems"):
                 backoff_time *= 2
                 # Cap the backoff time at 32 seconds & add jitter
                 delay = min(backoff_time, 32) + random.uniform(0, 1)
@@ -519,6 +544,10 @@ class DynamoDBDataLayer(BaseDataLayer):
                 thread_dict = item
 
             elif item["SK"].startswith("ELEMENT"):
+                if self.storage_provider is not None:
+                    item["url"] = await self.storage_provider.get_read_url(
+                        object_key=item["objectKey"],
+                    )
                 elements.append(item)
 
             elif item["SK"].startswith("STEP"):
@@ -585,3 +614,8 @@ class DynamoDBDataLayer(BaseDataLayer):
 
     async def build_debug_url(self) -> str:
         return ""
+
+    async def close(self) -> None:
+        if self.storage_provider:
+            await self.storage_provider.close()
+        self.client.close()

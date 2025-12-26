@@ -23,8 +23,17 @@ from pydantic import BaseModel
 from pydantic.dataclasses import dataclass
 
 InputWidgetType = Literal[
-    "switch", "slider", "select", "textinput", "tags", "numberinput"
+    "switch",
+    "slider",
+    "select",
+    "textinput",
+    "tags",
+    "numberinput",
+    "multiselect",
+    "checkbox",
+    "radio",
 ]
+ToastType = Literal["info", "success", "warning", "error"]
 
 
 class ThreadDict(TypedDict):
@@ -45,9 +54,9 @@ class Pagination(BaseModel):
 
 
 class ThreadFilter(BaseModel):
-    feedback: Optional[Literal[0, 1]] = None
-    userId: Optional[str] = None
-    search: Optional[str] = None
+    feedback: Literal[0, 1] | None = None
+    userId: str | None = None
+    search: str | None = None
 
 
 @dataclass
@@ -79,7 +88,7 @@ T = TypeVar("T", covariant=True)
 class HasFromDict(Protocol[T]):
     @classmethod
     def from_dict(cls, obj_dict: Any) -> T:
-        raise NotImplementedError()
+        raise NotImplementedError
 
 
 @dataclass
@@ -124,7 +133,8 @@ class AskSpec(DataClassJsonMixin):
     """Specification for asking the user."""
 
     timeout: int
-    type: Literal["text", "file", "action"]
+    type: Literal["text", "file", "action", "element"]
+    step_id: str
 
 
 @dataclass
@@ -135,6 +145,13 @@ class AskFileSpec(FileSpec, AskSpec, DataClassJsonMixin):
 @dataclass
 class AskActionSpec(ActionSpec, AskSpec, DataClassJsonMixin):
     """Specification for asking the user an action"""
+
+
+@dataclass
+class AskElementSpec(AskSpec, DataClassJsonMixin):
+    """Specification for asking the user a custom element"""
+
+    element_id: str
 
 
 class FileReference(TypedDict):
@@ -168,10 +185,12 @@ class InputAudioChunk:
     elapsedTime: float
     data: bytes
 
+
 class OutputAudioChunk(TypedDict):
     track: str
     mimeType: str
     data: bytes
+
 
 @dataclass
 class AskFileResponse:
@@ -184,12 +203,25 @@ class AskFileResponse:
 
 class AskActionResponse(TypedDict):
     name: str
-    value: str
+    payload: Dict
     label: str
-    description: str
+    tooltip: str
     forId: str
     id: str
-    collapsed: bool
+
+
+class AskElementResponse(TypedDict, total=False):
+    submitted: bool
+
+
+class UpdateThreadRequest(BaseModel):
+    threadId: str
+    name: str
+
+
+class ShareThreadRequest(BaseModel):
+    threadId: str
+    isShared: bool
 
 
 class DeleteThreadRequest(BaseModel):
@@ -205,6 +237,51 @@ class GetThreadsRequest(BaseModel):
     filter: ThreadFilter
 
 
+class CallActionRequest(BaseModel):
+    action: Dict
+    sessionId: str
+
+
+class ConnectStdioMCPRequest(BaseModel):
+    sessionId: str
+    clientType: Literal["stdio"]
+    name: str
+    fullCommand: str
+
+
+class ConnectSseMCPRequest(BaseModel):
+    sessionId: str
+    clientType: Literal["sse"]
+    name: str
+    url: str
+    # Optional HTTP headers to forward to the MCP transport (e.g. Authorization)
+    headers: Optional[Dict[str, str]] = None
+
+
+class ConnectStreamableHttpMCPRequest(BaseModel):
+    sessionId: str
+    clientType: Literal["streamable-http"]
+    name: str
+    url: str
+    # Optional HTTP headers to forward to the MCP transport (e.g. Authorization)
+    headers: Dict[str, str] | None = None
+
+
+ConnectMCPRequest = Union[
+    ConnectStdioMCPRequest, ConnectSseMCPRequest, ConnectStreamableHttpMCPRequest
+]
+
+
+class DisconnectMCPRequest(BaseModel):
+    sessionId: str
+    name: str
+
+
+class ElementRequest(BaseModel):
+    element: Dict
+    sessionId: str
+
+
 class Theme(str, Enum):
     light = "light"
     dark = "dark"
@@ -216,6 +293,7 @@ class Starter(DataClassJsonMixin):
 
     label: str
     message: str
+    command: Optional[str] = None
     icon: Optional[str] = None
 
 
@@ -226,11 +304,26 @@ class ChatProfile(DataClassJsonMixin):
     name: str
     markdown_description: str
     icon: Optional[str] = None
+    display_name: Optional[str] = None
     default: bool = False
     starters: Optional[List[Starter]] = None
+    config_overrides: Any = None
 
 
 FeedbackStrategy = Literal["BINARY"]
+
+
+class CommandDict(TypedDict):
+    # The identifier of the command, will be displayed in the UI
+    id: str
+    # The description of the command, will be displayed in the UI
+    description: str
+    # The lucide icon name
+    icon: str
+    # Display the command as a button in the composer
+    button: Optional[bool]
+    # Whether the command will be persistent unless the user toggles it
+    persistent: Optional[bool]
 
 
 class FeedbackDict(TypedDict):
@@ -251,3 +344,4 @@ class Feedback:
 
 class UpdateFeedbackRequest(BaseModel):
     feedback: Feedback
+    sessionId: str

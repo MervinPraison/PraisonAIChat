@@ -3,10 +3,17 @@ name: CI
 on:
   workflow_call:
   workflow_dispatch:
+  merge_group:
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, 'release/**']
+    paths-ignore:
+      - '*.md'
+      - LICENSE
   push:
-    branches: [main, dev]
+    branches: [main, dev, 'release/**']
+    paths-ignore:
+      - '*.md'
+      - LICENSE
 
 permissions: read-all
 
@@ -14,16 +21,24 @@ jobs:
   pytest:
     uses: ./.github/workflows/pytest.yaml
     secrets: inherit
-  mypy:
-    uses: ./.github/workflows/mypy.yaml
+  lint-backend:
+    uses: ./.github/workflows/lint-backend.yaml
     secrets: inherit
   e2e-tests:
     uses: ./.github/workflows/e2e-tests.yaml
     secrets: inherit
+  lint-ui:
+    uses: ./.github/workflows/lint-ui.yaml
+    secrets: inherit
   ci:
     runs-on: ubuntu-latest
     name: Run CI
-    needs: [mypy, pytest, e2e-tests]
+    if: always()  # This ensures the job always runs
+    needs: [lint-backend, pytest, lint-ui, e2e-tests]
     steps:
-      - name: Done
-        run: echo "Done"
+      # Propagate failure
+      - name: Check dependent jobs
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'action_required') || contains(needs.*.result, 'timed_out')
+        run: |
+          echo "Not all required jobs succeeded"
+          exit 1

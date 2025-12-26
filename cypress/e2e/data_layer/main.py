@@ -1,3 +1,4 @@
+import os
 import os.path
 import pickle
 from typing import Dict, List, Optional
@@ -16,7 +17,9 @@ from chainlit.types import (
     ThreadDict,
     ThreadFilter,
 )
-from literalai.helper import utc_now
+from chainlit.utils import utc_now
+
+os.environ["CHAINLIT_AUTH_SECRET"] = "SUPER_SECRET"  # nosec B105
 
 now = utc_now()
 
@@ -25,8 +28,8 @@ thread_history = [
         "id": "test1",
         "name": "thread 1",
         "createdAt": now,
-        "userId": "test",
-        "userIdentifier": "admin",
+        "userId": "user1_id",
+        "userIdentifier": "user1",
         "steps": [
             {
                 "id": "test1",
@@ -47,8 +50,8 @@ thread_history = [
     {
         "id": "test2",
         "createdAt": now,
-        "userId": "test",
-        "userIdentifier": "admin",
+        "userId": "user1_id",
+        "userIdentifier": "user1",
         "name": "thread 2",
         "steps": [
             {
@@ -69,30 +72,44 @@ thread_history = [
     },
 ]  # type: List[ThreadDict]
 deleted_thread_ids = []  # type: List[str]
+ELEMENTS_STORAGE = []
 
-THREAD_HISTORY_PICKLE_PATH = os.getenv("THREAD_HISTORY_PICKLE_PATH")
+THREAD_HISTORY_PICKLE_PATH = os.path.join(
+    os.path.dirname(__file__), "thread_history.pickle"
+)
 if THREAD_HISTORY_PICKLE_PATH and os.path.exists(THREAD_HISTORY_PICKLE_PATH):
     with open(THREAD_HISTORY_PICKLE_PATH, "rb") as f:
         thread_history = pickle.load(f)
 
 
 async def save_thread_history():
-    if THREAD_HISTORY_PICKLE_PATH:
-        # Force saving of thread history for reload when server restarts
-        await persist_user_session(
-            cl.context.session.thread_id, cl.context.session.to_persistable()
-        )
+    # Force saving of thread history for reload when server restarts
+    await persist_user_session(
+        cl.context.session.thread_id, cl.context.session.to_persistable()
+    )
 
-        with open(THREAD_HISTORY_PICKLE_PATH, "wb") as out_file:
-            pickle.dump(thread_history, out_file)
+    with open(THREAD_HISTORY_PICKLE_PATH, "wb") as out_file:
+        pickle.dump(thread_history, out_file)
 
 
 class TestDataLayer(cl_data.BaseDataLayer):
     async def get_user(self, identifier: str):
-        return cl.PersistedUser(id="test", createdAt=now, identifier=identifier)
+        if identifier == "user1":
+            return cl.PersistedUser(id="user1_id", createdAt=now, identifier=identifier)
+        elif identifier == "user2":
+            return cl.PersistedUser(id="user2_id", createdAt=now, identifier=identifier)
+        return None
 
     async def create_user(self, user: cl.User):
-        return cl.PersistedUser(id="test", createdAt=now, identifier=user.identifier)
+        if user.identifier == "user1":
+            return cl.PersistedUser(
+                id="user1_id", createdAt=now, identifier=user.identifier
+            )
+        elif user.identifier == "user2":
+            return cl.PersistedUser(
+                id="user2_id", createdAt=now, identifier=user.identifier
+            )
+        return None
 
     async def update_thread(
         self,
@@ -119,7 +136,11 @@ class TestDataLayer(cl_data.BaseDataLayer):
                     "tags": tags,
                     "createdAt": utc_now(),
                     "userId": user_id,
-                    "userIdentifier": "admin",
+                    "userIdentifier": "user1"
+                    if user_id == "user1_id"
+                    else "user2"
+                    if user_id == "user2_id"
+                    else "unknown",
                     "steps": [],
                 }
             )
@@ -137,7 +158,8 @@ class TestDataLayer(cl_data.BaseDataLayer):
             thread["steps"].append(step_dict)
 
     async def get_thread_author(self, thread_id: str):
-        return "admin"
+        thread = await self.get_thread(thread_id)
+        return thread["userIdentifier"] if thread else None
 
     async def list_threads(
         self, pagination: Pagination, filters: ThreadFilter
@@ -171,12 +193,15 @@ class TestDataLayer(cl_data.BaseDataLayer):
 
     @queue_until_user_message()
     async def create_element(self, element: "Element"):
-        pass
+        if element.url == "http://example.org/test.txt":
+            element.url = "http://example.com/test.txt"
+
+        ELEMENTS_STORAGE.append(element.to_dict())
 
     async def get_element(
         self, thread_id: str, element_id: str
     ) -> Optional["ElementDict"]:
-        pass
+        return next((e for e in ELEMENTS_STORAGE if e["id"] == element_id), None)
 
     @queue_until_user_message()
     async def delete_element(self, element_id: str, thread_id: Optional[str] = None):
@@ -193,8 +218,13 @@ class TestDataLayer(cl_data.BaseDataLayer):
     async def build_debug_url(self) -> str:
         return ""
 
+    async def close(self) -> None:
+        pass
 
-cl_data._data_layer = TestDataLayer()
+
+@cl.data_layer
+def data_layer():
+    return TestDataLayer()
 
 
 async def send_count():
@@ -225,8 +255,10 @@ async def handle_message():
 
 @cl.password_auth_callback
 def auth_callback(username: str, password: str) -> Optional[cl.User]:
-    if (username, password) == ("admin", "admin"):
-        return cl.User(identifier="admin")
+    if (username, password) == ("user1", "user1"):
+        return cl.User(identifier="user1")
+    elif (username, password) == ("user2", "user2"):
+        return cl.User(identifier="user2")
     else:
         return None
 

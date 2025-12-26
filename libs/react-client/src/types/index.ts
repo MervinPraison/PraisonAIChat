@@ -1,5 +1,7 @@
 export * from './action';
 export * from './element';
+export * from './command';
+export * from './mode';
 export * from './file';
 export * from './feedback';
 export * from './step';
@@ -7,3 +9,4 @@ export * from './user';
 export * from './thread';
 export * from './history';
 export * from './config';
+export * from './mcp';

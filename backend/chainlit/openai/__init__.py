@@ -1,11 +1,11 @@
 import asyncio
 from typing import Union
 
-from chainlit.context import get_context
-from chainlit.step import Step
-from chainlit.utils import check_module_version
 from literalai import ChatGeneration, CompletionGeneration
-from literalai.helper import timestamp_utc
+
+from chainlit.context import local_steps
+from chainlit.step import Step
+from chainlit.utils import check_module_version, timestamp_utc
 
 
 def instrument_openai():
@@ -19,11 +19,9 @@ def instrument_openai():
     def on_new_generation(
         generation: Union["ChatGeneration", "CompletionGeneration"], timing
     ):
-        context = get_context()
+        previous_steps = local_steps.get()
 
-        parent_id = None
-        if context.current_step:
-            parent_id = context.current_step.id
+        parent_id = previous_steps[-1].id if previous_steps else None
 
         step = Step(
             name=generation.model if generation.model else generation.provider,
@@ -44,11 +42,11 @@ def instrument_openai():
         )
 
         if isinstance(generation, ChatGeneration):
-            step.input = generation.messages
+            step.input = generation.messages  # type: ignore
             step.output = generation.message_completion  # type: ignore
         else:
-            step.input = generation.prompt
-            step.output = generation.completion
+            step.input = generation.prompt  # type: ignore
+            step.output = generation.completion  # type: ignore
 
         asyncio.create_task(step.send())
 

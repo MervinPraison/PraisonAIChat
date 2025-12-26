@@ -1,22 +1,69 @@
 import inspect
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, overload
+
+from fastapi import Request, Response
+from mcp import ClientSession
+from starlette.datastructures import Headers
 
 from chainlit.action import Action
 from chainlit.config import config
+from chainlit.context import context
+from chainlit.data.base import BaseDataLayer
+from chainlit.mcp import McpConnection
 from chainlit.message import Message
 from chainlit.oauth_providers import get_configured_oauth_providers
 from chainlit.step import Step, step
-from chainlit.telemetry import trace
 from chainlit.types import ChatProfile, Starter, ThreadDict
 from chainlit.user import User
 from chainlit.utils import wrap_user_function
-from fastapi import Request, Response
-from starlette.datastructures import Headers
 
 
-@trace
+def on_app_startup(func: Callable[[], Union[None, Awaitable[None]]]) -> Callable:
+    """
+    Hook to run code when the Chainlit application starts.
+    Useful for initializing resources, loading models, setting up database connections, etc.
+    The function can be synchronous or asynchronous.
+
+    Args:
+        func (Callable[[], Union[None, Awaitable[None]]]): The startup hook to execute. Takes no arguments.
+
+    Example:
+        @cl.on_app_startup
+        async def startup():
+            print("Application is starting!")
+            # Initialize resources here
+
+    Returns:
+        Callable[[], Union[None, Awaitable[None]]]: The decorated startup hook.
+    """
+    config.code.on_app_startup = wrap_user_function(func, with_task=False)
+    return func
+
+
+def on_app_shutdown(func: Callable[[], Union[None, Awaitable[None]]]) -> Callable:
+    """
+    Hook to run code when the Chainlit application shuts down.
+    Useful for cleaning up resources, closing connections, saving state, etc.
+    The function can be synchronous or asynchronous.
+
+    Args:
+        func (Callable[[], Union[None, Awaitable[None]]]): The shutdown hook to execute. Takes no arguments.
+
+    Example:
+        @cl.on_app_shutdown
+        async def shutdown():
+            print("Application is shutting down!")
+            # Clean up resources here
+
+    Returns:
+        Callable[[], Union[None, Awaitable[None]]]: The decorated shutdown hook.
+    """
+    config.code.on_app_shutdown = wrap_user_function(func, with_task=False)
+    return func
+
+
 def password_auth_callback(
-    func: Callable[[str, str], Awaitable[Optional[User]]]
+    func: Callable[[str, str], Awaitable[Optional[User]]],
 ) -> Callable:
     """
     Framework agnostic decorator to authenticate the user.
@@ -36,9 +83,8 @@ def password_auth_callback(
     return func
 
 
-@trace
 def header_auth_callback(
-    func: Callable[[Headers], Awaitable[Optional[User]]]
+    func: Callable[[Headers], Awaitable[Optional[User]]],
 ) -> Callable:
     """
     Framework agnostic decorator to authenticate the user via a header
@@ -58,7 +104,6 @@ def header_auth_callback(
     return func
 
 
-@trace
 def oauth_callback(
     func: Callable[
         [str, str, Dict[str, str], User, Optional[str]], Awaitable[Optional[User]]
@@ -87,7 +132,6 @@ def oauth_callback(
     return func
 
 
-@trace
 def on_logout(func: Callable[[Request, Response], Any]) -> Callable:
     """
     Function called when the user logs out.
@@ -98,7 +142,6 @@ def on_logout(func: Callable[[Request, Response], Any]) -> Callable:
     return func
 
 
-@trace
 def on_message(func: Callable) -> Callable:
     """
     Framework agnostic decorator to react to messages coming from the UI.
@@ -123,7 +166,31 @@ def on_message(func: Callable) -> Callable:
     return func
 
 
-@trace
+async def send_window_message(data: Any):
+    """
+    Send custom data to the host window via a window.postMessage event.
+
+    Args:
+        data (Any): The data to send with the event.
+    """
+    await context.emitter.send_window_message(data)
+
+
+def on_window_message(func: Callable[[str], Any]) -> Callable:
+    """
+    Hook to react to javascript postMessage events coming from the UI.
+
+    Args:
+        func (Callable[[str], Any]): The function to be called when a window message is received.
+                                     Takes the message content as a string parameter.
+
+    Returns:
+        Callable[[str], Any]: The decorated on_window_message function.
+    """
+    config.code.on_window_message = wrap_user_function(func)
+    return func
+
+
 def on_chat_start(func: Callable) -> Callable:
     """
     Hook to react to the user websocket connection event.
@@ -141,7 +208,6 @@ def on_chat_start(func: Callable) -> Callable:
     return func
 
 
-@trace
 def on_chat_resume(func: Callable[[ThreadDict], Any]) -> Callable:
     """
     Hook to react to resume websocket connection event.
@@ -157,10 +223,19 @@ def on_chat_resume(func: Callable[[ThreadDict], Any]) -> Callable:
     return func
 
 
-@trace
+@overload
 def set_chat_profiles(
     func: Callable[[Optional["User"]], Awaitable[List["ChatProfile"]]],
-) -> Callable:
+) -> Callable[[Optional["User"]], Awaitable[List["ChatProfile"]]]: ...
+
+
+@overload
+def set_chat_profiles(
+    func: Callable[[Optional["User"], Optional["str"]], Awaitable[List["ChatProfile"]]],
+) -> Callable[[Optional["User"], Optional["str"]], Awaitable[List["ChatProfile"]]]: ...
+
+
+def set_chat_profiles(func):
     """
     Programmatic declaration of the available chat profiles (can depend on the User from the session if authentication is setup).
 
@@ -175,25 +250,33 @@ def set_chat_profiles(
     return func
 
 
-@trace
+@overload
 def set_starters(
-    func: Callable[[Optional["User"]], Awaitable[List["Starter"]]]
-) -> Callable:
+    func: Callable[[Optional["User"]], Awaitable[List["Starter"]]],
+) -> Callable[[Optional["User"]], Awaitable[List["Starter"]]]: ...
+
+
+@overload
+def set_starters(
+    func: Callable[[Optional["User"], Optional["str"]], Awaitable[List["Starter"]]],
+) -> Callable[[Optional["User"], Optional["str"]], Awaitable[List["Starter"]]]: ...
+
+
+def set_starters(func):
     """
     Programmatic declaration of the available starter (can depend on the User from the session if authentication is setup).
 
     Args:
-        func (Callable[[Optional["User"]], Awaitable[List["Starter"]]]): The function declaring the starters.
+        func (Callable[[Optional["User"], Optional["str"]], Awaitable[List["Starter"]]]): The function declaring the starters with optional user and language arguments.
 
     Returns:
-        Callable[[Optional["User"]], Awaitable[List["Starter"]]]: The decorated function.
+        Callable[[Optional["User"], Optional["str"]], Awaitable[List["Starter"]]]: The decorated function.
     """
 
     config.code.set_starters = wrap_user_function(func)
     return func
 
 
-@trace
 def on_chat_end(func: Callable) -> Callable:
     """
     Hook to react to the user websocket disconnect event.
@@ -209,7 +292,6 @@ def on_chat_end(func: Callable) -> Callable:
     return func
 
 
-@trace
 def on_audio_start(func: Callable) -> Callable:
     """
     Hook to react to the user initiating audio.
@@ -221,7 +303,7 @@ def on_audio_start(func: Callable) -> Callable:
     config.code.on_audio_start = wrap_user_function(func, with_task=False)
     return func
 
-@trace
+
 def on_audio_chunk(func: Callable) -> Callable:
     """
     Hook to react to the audio chunks being sent.
@@ -237,7 +319,6 @@ def on_audio_chunk(func: Callable) -> Callable:
     return func
 
 
-@trace
 def on_audio_end(func: Callable) -> Callable:
     """
     Hook to react to the audio stream ending. This is called after the last audio chunk is sent.
@@ -252,9 +333,8 @@ def on_audio_end(func: Callable) -> Callable:
     return func
 
 
-@trace
 def author_rename(
-    func: Callable[[str], Awaitable[str]]
+    func: Callable[[str], Awaitable[str]],
 ) -> Callable[[str], Awaitable[str]]:
     """
     Useful to rename the author of message to display more friendly author names in the UI.
@@ -269,7 +349,28 @@ def author_rename(
     return func
 
 
-@trace
+def on_mcp_connect(
+    func: Callable[[McpConnection, ClientSession], Awaitable[None]],
+) -> Callable[[McpConnection, ClientSession], Awaitable[None]]:
+    """
+    Called everytime an MCP is connected
+    """
+
+    config.code.on_mcp_connect = wrap_user_function(func)
+    return func
+
+
+def on_mcp_disconnect(
+    func: Callable[[str, ClientSession], Awaitable[None]],
+) -> Callable[[str, ClientSession], Awaitable[None]]:
+    """
+    Called everytime an MCP is disconnected
+    """
+
+    config.code.on_mcp_disconnect = wrap_user_function(func)
+    return func
+
+
 def on_stop(func: Callable) -> Callable:
     """
     Hook to react to the user stopping a thread.
@@ -294,7 +395,7 @@ def action_callback(name: str) -> Callable:
     """
 
     def decorator(func: Callable[[Action], Any]):
-        config.code.action_callbacks[name] = wrap_user_function(func, with_task=True)
+        config.code.action_callbacks[name] = wrap_user_function(func, with_task=False)
         return func
 
     return decorator
@@ -314,4 +415,79 @@ def on_settings_update(
     """
 
     config.code.on_settings_update = wrap_user_function(func, with_task=True)
+    return func
+
+
+def data_layer(
+    func: Callable[[], BaseDataLayer],
+) -> Callable[[], BaseDataLayer]:
+    """
+    Hook to configure custom data layer.
+    """
+
+    # We don't use wrap_user_function here because:
+    # 1. We don't need to support async here and;
+    # 2. We don't want to change the API for get_data_layer() to be async, everywhere (at this point).
+    config.code.data_layer = func
+    return func
+
+
+def on_feedback(func: Callable) -> Callable:
+    """
+    Hook to react to user feedback events from the UI.
+    The decorated function is called every time feedback is received.
+
+    Args:
+        func (Callable[[Feedback], Any]): The function to be called when feedback is received. Takes a cl.Feedback object.
+
+    Example:
+        @cl.on_feedback
+        async def on_feedback(feedback: Feedback):
+            print(f"Received feedback: {feedback.value} for step {feedback.forId}")
+            # Handle feedback here
+
+    Returns:
+        Callable[[Feedback], Any]: The decorated on_feedback function.
+    """
+    config.code.on_feedback = wrap_user_function(func)
+    return func
+
+
+def on_slack_reaction_added(func: Callable[[Dict[str, Any]], Any]) -> Callable:
+    """
+    Hook to react to Slack reaction_added events.
+    The decorated function is called every time a user adds a reaction to a message in Slack.
+
+    Args:
+        func (Callable[[Dict[str, Any]], Any]): The function to be called when a reaction is added.
+            Takes a Slack event dictionary containing:
+            - reaction: The emoji reaction name (e.g., "thumbsup")
+            - user: The user ID who added the reaction
+            - item: Dictionary with type, ts, and channel of the reacted item
+
+    Example:
+        @cl.on_slack_reaction_added
+        async def handle_reaction(event: Dict[str, Any]):
+            reaction = event.get("reaction")
+            user_id = event.get("user")
+            print(f"User {user_id} added reaction {reaction}")
+            # Handle reaction here
+
+    Returns:
+        Callable[[Dict[str, Any]], Any]: The decorated on_slack_reaction_added function.
+    """
+    config.code.on_slack_reaction_added = wrap_user_function(func)
+    return func
+
+
+def on_shared_thread_view(
+    func: Callable[[ThreadDict, Optional[User]], Awaitable[bool]],
+) -> Callable[[ThreadDict, Optional[User]], Awaitable[bool]]:
+    """Hook to authorize viewing a shared thread.
+
+    Users must implement and return True to allow a non-author to view a thread.
+    Thread metadata contains "is_shared" boolean flag and "shared_at" timestamp for custom thread sharing.
+    Signature: async (thread: ThreadDict, viewer: Optional[User]) -> bool
+    """
+    config.code.on_shared_thread_view = wrap_user_function(func)
     return func

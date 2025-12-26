@@ -5,25 +5,27 @@ import uuid
 from abc import ABC
 from typing import Dict, List, Optional, Union, cast
 
+from literalai.observability.step import MessageStepType
+
 from chainlit.action import Action
 from chainlit.chat_context import chat_context
 from chainlit.config import config
 from chainlit.context import context, local_steps
 from chainlit.data import get_data_layer
-from chainlit.element import ElementBased
+from chainlit.element import CustomElement, ElementBased
 from chainlit.logger import logger
 from chainlit.step import StepDict
-from chainlit.telemetry import trace_event
 from chainlit.types import (
     AskActionResponse,
     AskActionSpec,
+    AskElementResponse,
+    AskElementSpec,
     AskFileResponse,
     AskFileSpec,
     AskSpec,
     FileDict,
 )
-from literalai.helper import utc_now
-from literalai.observability.step import MessageStepType
+from chainlit.utils import utc_now
 
 
 class MessageBase(ABC):
@@ -37,15 +39,15 @@ class MessageBase(ABC):
     fail_on_persist_error: bool = False
     persisted = False
     is_error = False
+    command: Optional[str] = None
+    modes: Optional[Dict[str, str]] = None
     parent_id: Optional[str] = None
     language: Optional[str] = None
     metadata: Optional[Dict] = None
     tags: Optional[List[str]] = None
     wait_for_answer = False
-    indent: Optional[int] = None
 
     def __post_init__(self) -> None:
-        trace_event(f"init {self.__class__.__name__}")
         self.thread_id = context.session.thread_id
 
         previous_steps = local_steps.get() or []
@@ -59,17 +61,18 @@ class MessageBase(ABC):
     @classmethod
     def from_dict(self, _dict: StepDict):
         type = _dict.get("type", "assistant_message")
-        message = Message(
+        return Message(
             id=_dict["id"],
             parent_id=_dict.get("parentId"),
             created_at=_dict["createdAt"],
             content=_dict["output"],
             author=_dict.get("name", config.ui.name),
+            command=_dict.get("command"),
+            modes=_dict.get("modes"),
             type=type,  # type: ignore
             language=_dict.get("language"),
+            metadata=_dict.get("metadata", {}),
         )
-
-        return message
 
     def to_dict(self) -> StepDict:
         _dict: StepDict = {
@@ -77,6 +80,8 @@ class MessageBase(ABC):
             "threadId": self.thread_id,
             "parentId": self.parent_id,
             "createdAt": self.created_at,
+            "command": self.command,
+            "modes": self.modes,
             "start": self.created_at,
             "end": self.created_at,
             "output": self.content,
@@ -86,7 +91,6 @@ class MessageBase(ABC):
             "streaming": self.streaming,
             "isError": self.is_error,
             "waitForAnswer": self.wait_for_answer,
-            "indent": self.indent,
             "metadata": self.metadata or {},
             "tags": self.tags,
         }
@@ -99,7 +103,6 @@ class MessageBase(ABC):
         """
         Update a message already sent to the UI.
         """
-        trace_event("update_message")
 
         if self.streaming:
             self.streaming = False
@@ -114,7 +117,7 @@ class MessageBase(ABC):
             except Exception as e:
                 if self.fail_on_persist_error:
                     raise e
-                logger.error(f"Failed to persist message update: {str(e)}")
+                logger.error(f"Failed to persist message update: {e!s}")
 
         await context.emitter.update_step(step_dict)
 
@@ -124,7 +127,6 @@ class MessageBase(ABC):
         """
         Remove a message already sent to the UI.
         """
-        trace_event("remove_message")
         chat_context.remove(self)
         step_dict = self.to_dict()
         data_layer = get_data_layer()
@@ -134,7 +136,7 @@ class MessageBase(ABC):
             except Exception as e:
                 if self.fail_on_persist_error:
                     raise e
-                logger.error(f"Failed to persist message deletion: {str(e)}")
+                logger.error(f"Failed to persist message deletion: {e!s}")
 
         await context.emitter.delete_step(step_dict)
 
@@ -150,7 +152,7 @@ class MessageBase(ABC):
             except Exception as e:
                 if self.fail_on_persist_error:
                     raise e
-                logger.error(f"Failed to persist message creation: {str(e)}")
+                logger.error(f"Failed to persist message creation: {e!s}")
 
         return step_dict
 
@@ -177,6 +179,9 @@ class MessageBase(ABC):
         Sends a token to the UI. This is useful for streaming messages.
         Once all tokens have been streamed, call .send() to end the stream and persist the message if persistence is enabled.
         """
+        if not token:
+            return
+
         if is_sequence:
             self.content = token
         else:
@@ -218,6 +223,8 @@ class Message(MessageBase):
         tags: Optional[List[str]] = None,
         id: Optional[str] = None,
         parent_id: Optional[str] = None,
+        command: Optional[str] = None,
+        modes: Optional[Dict[str, str]] = None,
         created_at: Union[str, None] = None,
     ):
         time.sleep(0.001)
@@ -241,6 +248,12 @@ class Message(MessageBase):
         if parent_id:
             self.parent_id = str(parent_id)
 
+        if command:
+            self.command = str(command)
+
+        if modes:
+            self.modes = modes
+
         if created_at:
             self.created_at = created_at
 
@@ -259,7 +272,6 @@ class Message(MessageBase):
         Send the message to the UI and persist it in the cloud if a project ID is configured.
         Return the ID of the message.
         """
-        trace_event("send_message")
         await super().send()
 
         # Create tasks for all actions and elements
@@ -276,7 +288,6 @@ class Message(MessageBase):
         Send the message to the UI and persist it in the cloud if a project ID is configured.
         Return the ID of the message.
         """
-        trace_event("send_message")
         await super().update()
 
         # Update tasks for all actions and elements
@@ -326,7 +337,6 @@ class ErrorMessage(MessageBase):
         Send the error message to the UI and persist it in the cloud if a project ID is configured.
         Return the ID of the message.
         """
-        trace_event("send_error_message")
         return await super().send()
 
 
@@ -370,7 +380,6 @@ class AskUserMessage(AskMessageBase):
         """
         Sends the question to ask to the UI and waits for the reply.
         """
-        trace_event("send_ask_user")
         if not self.created_at:
             self.created_at = utc_now()
 
@@ -384,7 +393,7 @@ class AskUserMessage(AskMessageBase):
 
         step_dict = await self._create()
 
-        spec = AskSpec(type="text", timeout=self.timeout)
+        spec = AskSpec(type="text", step_id=step_dict["id"], timeout=self.timeout)
 
         res = cast(
             Union[None, StepDict],
@@ -438,8 +447,6 @@ class AskFileMessage(AskMessageBase):
         """
         Sends the message to request a file from the user to the UI and waits for the reply.
         """
-        trace_event("send_ask_file")
-
         if not self.created_at:
             self.created_at = utc_now()
 
@@ -455,6 +462,7 @@ class AskFileMessage(AskMessageBase):
 
         spec = AskFileSpec(
             type="file",
+            step_id=step_dict["id"],
             accept=self.accept,
             max_size_mb=self.max_size_mb,
             max_files=self.max_files,
@@ -509,8 +517,6 @@ class AskActionMessage(AskMessageBase):
         """
         Sends the question to ask to the UI and waits for the reply
         """
-        trace_event("send_ask_action")
-
         if not self.created_at:
             self.created_at = utc_now()
 
@@ -530,7 +536,12 @@ class AskActionMessage(AskMessageBase):
             action_keys.append(action.id)
             await action.send(for_id=str(step_dict["id"]))
 
-        spec = AskActionSpec(type="action", timeout=self.timeout, keys=action_keys)
+        spec = AskActionSpec(
+            type="action",
+            step_id=step_dict["id"],
+            timeout=self.timeout,
+            keys=action_keys,
+        )
 
         res = cast(
             Union[AskActionResponse, None],
@@ -542,7 +553,71 @@ class AskActionMessage(AskMessageBase):
         if res is None:
             self.content = "Timed out: no action was taken"
         else:
-            self.content = f'**Selected:** {res["label"]}'
+            self.content = f"**Selected:** {res['label']}"
+
+        self.wait_for_answer = False
+
+        await self.update()
+
+        return res
+
+
+class AskElementMessage(AskMessageBase):
+    """Ask the user to submit a custom element."""
+
+    def __init__(
+        self,
+        content: str,
+        element: CustomElement,
+        author=config.ui.name,
+        timeout=90,
+        raise_on_timeout=False,
+    ):
+        self.content = content
+        self.element = element
+        self.author = author
+        self.timeout = timeout
+        self.raise_on_timeout = raise_on_timeout
+
+        super().__post_init__()
+
+    async def send(self) -> Union[AskElementResponse, None]:
+        """Send the custom element to the UI and wait for the reply."""
+        if not self.created_at:
+            self.created_at = utc_now()
+
+        if self.streaming:
+            self.streaming = False
+
+        if config.code.author_rename:
+            self.author = await config.code.author_rename(self.author)
+
+        self.wait_for_answer = True
+
+        step_dict = await self._create()
+
+        await self.element.send(for_id=str(step_dict["id"]))
+
+        spec = AskElementSpec(
+            type="element",
+            step_id=step_dict["id"],
+            timeout=self.timeout,
+            element_id=self.element.id,
+        )
+
+        res = cast(
+            Union[AskElementResponse, None],
+            await context.emitter.send_ask_user(step_dict, spec, self.raise_on_timeout),
+        )
+
+        await self.element.remove()
+
+        if res is None:
+            self.content = "Timed out"
+        elif res.get("submitted"):
+            self.content = "Thanks for submitting"
+        else:
+            self.content = "Cancelled"
 
         self.wait_for_answer = False
 
