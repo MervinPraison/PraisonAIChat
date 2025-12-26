@@ -79,6 +79,7 @@ async def resume_thread(session: WebsocketSession):
 
 
 def load_user_env(user_env):
+    user_env_dict = None
     if user_env:
         user_env_dict = json.loads(user_env)
     # Check user env
@@ -119,10 +120,10 @@ async def _authenticate_connection(
 
 
 @sio.on("connect")  # pyright: ignore [reportOptionalCall]
-async def connect(sid: str, environ: WSGIEnvironment, auth: WebSocketSessionAuth):
+async def connect(sid: str, environ: WSGIEnvironment, auth: WebSocketSessionAuth = None):
     user: User | PersistedUser | None = None
     token: str | None = None
-    thread_id = auth.get("threadId", None)
+    thread_id = auth.get("threadId", None) if auth else None
 
     if require_login():
         try:
@@ -149,15 +150,16 @@ async def connect(sid: str, environ: WSGIEnvironment, auth: WebSocketSessionAuth
     def emit_call_fn(event: Literal["ask", "call_fn"], data, timeout):
         return sio.call(event, data, timeout=timeout, to=sid)
 
-    session_id = auth["sessionId"]
+    import uuid
+    session_id = auth["sessionId"] if auth else str(uuid.uuid4())
     if restore_existing_session(sid, session_id, emit_fn, emit_call_fn, environ):
         return True
 
-    user_env_string = auth.get("userEnv", None)
+    user_env_string = auth.get("userEnv", None) if auth else None
     user_env = load_user_env(user_env_string)
 
-    client_type = auth["clientType"]
-    url_encoded_chat_profile = auth.get("chatProfile", None)
+    client_type = auth["clientType"] if auth else "webapp"
+    url_encoded_chat_profile = auth.get("chatProfile", None) if auth else None
     chat_profile = (
         unquote(url_encoded_chat_profile) if url_encoded_chat_profile else None
     )
