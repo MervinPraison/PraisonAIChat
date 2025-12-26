@@ -1,118 +1,96 @@
-# Welcome to Chainlit by Literal AI 👋
+# PraisonAI Chat
 
-[![](https://dcbadge.vercel.app/api/server/ZThrUxbAYw?style=flat)](https://discord.gg/k73SQ3FyUh)
-[![Twitter](https://img.shields.io/twitter/url/https/twitter.com/chainlit_io.svg?style=social&label=Follow%20%40chainlit_io)](https://twitter.com/chainlit_io)
-![PyPI - Downloads](https://img.shields.io/pypi/dm/chainlit)
-[![GitHub Contributors](https://img.shields.io/github/contributors/chainlit/chainlit)](https://github.com/chainlit/chainlit/graphs/contributors)
-[![CI](https://github.com/Chainlit/chainlit/actions/workflows/ci.yaml/badge.svg)](https://github.com/Chainlit/chainlit/actions/workflows/ci.yaml)
+**Modern AI Agent Interface for PraisonAI**
 
-**Build production-ready Conversational AI applications in minutes, not weeks ⚡️**
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/praisonai-chat)](https://pypi.org/project/praisonai-chat/)
+[![GitHub Contributors](https://img.shields.io/github/contributors/MervinPraison/PraisonAIChat)](https://github.com/MervinPraison/PraisonAIChat/graphs/contributors)
 
-Chainlit is an open-source async Python framework which allows developers to build scalable Conversational AI or agentic applications.
+PraisonAI Chat is a powerful, modern chat interface designed for AI agent interactions. Built for the [PraisonAI](https://github.com/MervinPraison/PraisonAI) multi-agent framework.
 
-- ✅ ChatGPT-like application
-- ✅ Embedded Chatbot & Software Copilot
-- ✅ Slack & Discord
-- ✅ Custom frontend (build your own agentic experience)
-- ✅ API Endpoint
+## Features
 
-Full documentation is available [here](https://docs.chainlit.io). You can ask Chainlit related questions to [Chainlit Help](https://help.chainlit.io/), an app built using Chainlit!
-
-> [!NOTE]  
-> Check out [Literal AI](https://literalai.com), our product to monitor and evaluate LLM applications! It works with any Python or TypeScript applications and [seamlessly](https://docs.chainlit.io/data-persistence/overview) with Chainlit by adding a `LITERAL_API_KEY` in your project.
-> 
-> Chainlit is developed and maintained by the Literal AI team, which is currently focused on expanding the capabilities of Literal AI. While we continue to support and maintain Chainlit, we are also committed to enabling the community to contribute, particularly in areas like integrations and data layers.
-
-<p align="center">
-    <img src="https://github.com/Chainlit/chainlit/assets/13104895/0c2cc7a9-766c-41d3-aae2-117a2d0eb8ed" alt="Chainlit user interface" width="80%"></img>
-</p>
+- **Multi-Agent Support** - Seamlessly interact with multiple AI agents
+- **Tool Call Visualization** - See agent tool calls and their results in real-time
+- **Streaming Responses** - Real-time streaming of agent responses
+- **Session Management** - Persistent sessions with history
+- **Run Timeline** - Visual timeline of agent runs and traces
+- **Modern UI** - Clean, responsive interface built with React
 
 ## Installation
 
-Open a terminal and run:
-
 ```sh
-pip install chainlit
-chainlit hello
+pip install praisonai[chat]
+praisonai chat
 ```
 
-If this opens the `hello app` in your browser, you're all set!
+Or run directly with the CLI:
 
-## 🚀 Quickstart
+```sh
+praisonai chat --port 8000
+```
 
-### 🐍 Pure Python
+## Quick Start
 
-Create a new file `demo.py` with the following code:
+### With PraisonAI Agents
 
 ```python
-import chainlit as cl
+from praisonaiagents import Agent
+from praisonai.chat import start_chat_server
 
+agent = Agent(
+    name="Assistant",
+    instructions="You are a helpful assistant."
+)
 
-@cl.step(type="tool")
-async def tool():
-    # Fake tool
-    await cl.sleep(2)
-    return "Response from the tool!"
-
-
-@cl.on_message  # this function will be called every time a user inputs a message in the UI
-async def main(message: cl.Message):
-    """
-    This function is called every time a user inputs a message in the UI.
-    It sends back an intermediate response from the tool, followed by the final answer.
-
-    Args:
-        message: The user's message.
-
-    Returns:
-        None.
-    """
-
-
-    # Call the tool
-    tool_res = await tool()
-
-    await cl.Message(content=tool_res).send()
+# Start the chat UI with your agent
+start_chat_server(agent=agent, port=8000)
 ```
 
-Now run it!
+### Standalone Mode
 
 ```sh
-chainlit run demo.py -w
+praisonai chat
 ```
 
-<img src="/images/quick-start.png" alt="Quick Start"></img>
+This starts the chat interface at `http://localhost:8000`.
 
-## 🎉 Key Features and Integrations
+## Key Features
 
-Full documentation is available [here](https://docs.chainlit.io). Key features:
+- **Multi Modal chats** - Support for text, images, and files
+- **Chain of Thought visualization** - See agent reasoning steps
+- **Data persistence** - Save and restore chat sessions
+- **Authentication** - Built-in auth support
+- **Tool Integration** - Visualize tool calls and results
 
-- [💬 Multi Modal chats](https://docs.chainlit.io/advanced-features/multi-modal)
-- [💭 Chain of Thought visualization](https://docs.chainlit.io/concepts/step)
-- [💾 Data persistence + human feedback](https://docs.chainlit.io/data-persistence/overview)
-- [🐛 Debug Mode](https://docs.chainlit.io/data-persistence/enterprise#debug-mode)
-- [👤 Authentication](https://docs.chainlit.io/authentication/overview)
+## Integration with PraisonAI
 
-Chainlit is compatible with all Python programs and libraries. That being said, it comes with integrations for:
+PraisonAI Chat integrates seamlessly with the PraisonAI agent framework:
 
-- [LangChain](https://docs.chainlit.io/integrations/langchain)
-- [Llama Index](https://docs.chainlit.io/integrations/llama-index)
-- [Autogen](https://github.com/Chainlit/cookbook/tree/main/pyautogen)
-- [OpenAI Assistant](https://github.com/Chainlit/cookbook/tree/main/openai-assistant)
-- [Haystack](https://docs.chainlit.io/integrations/haystack)
+```python
+from praisonaiagents import Agent, Task, PraisonAIAgents
 
-## 📚 More Examples - Cookbook
+# Define your agents
+researcher = Agent(name="Researcher", role="Research specialist")
+writer = Agent(name="Writer", role="Content writer")
 
-You can find various examples of Chainlit apps [here](https://github.com/Chainlit/cookbook) that leverage tools and services such as OpenAI, Anthropiс, LangChain, LlamaIndex, ChromaDB, Pinecone and more.
+# Create tasks
+research_task = Task(description="Research the topic", agent=researcher)
+write_task = Task(description="Write the article", agent=writer)
 
-Tell us what you would like to see added in Chainlit using the Github issues or on [Discord](https://discord.gg/k73SQ3FyUh).
+# Run with chat UI
+agents = PraisonAIAgents(agents=[researcher, writer], tasks=[research_task, write_task])
+```
 
-## 💁 Contributing
+## Documentation
 
-As an open-source initiative in a rapidly evolving domain, we welcome contributions, be it through the addition of new features or the improvement of documentation.
+Full documentation is available at [docs.praison.ai](https://docs.praison.ai).
 
-For detailed information on how to contribute, see [here](.github/CONTRIBUTING.md).
+## Contributing
 
-## 📃 License
+We welcome contributions! Please see [CONTRIBUTING.md](.github/CONTRIBUTING.md) for guidelines.
 
-Chainlit is open-source and licensed under the [Apache 2.0](LICENSE) license.
+## License
+
+This project is licensed under the [Apache 2.0](LICENSE) license.
+
+**Based on [Chainlit](https://github.com/Chainlit/chainlit)** - An open-source async Python framework for building conversational AI applications.
