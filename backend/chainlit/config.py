@@ -32,7 +32,11 @@ if TYPE_CHECKING:
     from chainlit.types import InputAudioChunk, ChatProfile, Starter, ThreadDict
     from chainlit.user import User
     from fastapi import Request, Response
-
+else:
+    # Pydantic needs to resolve forward annotations. Because all of these are used
+    # within `typing.Callable`, alias to `Any` as Pydantic does not perform validation
+    # of callable argument/return types anyway.
+    Request = Response = Action = Message = ChatProfile = InputAudioChunk = Starter = ThreadDict = User = Any  # fmt: off
 
 BACKEND_ROOT = os.path.dirname(__file__)
 PACKAGE_ROOT = os.path.dirname(os.path.dirname(BACKEND_ROOT))
